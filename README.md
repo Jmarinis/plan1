@@ -7,3 +7,4 @@ P2P heterogeneous cluster written in Rust
     - Verify state of internal database
 
 - Start http listener
+    - implement https
