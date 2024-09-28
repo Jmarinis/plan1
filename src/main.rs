@@ -20,8 +20,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let acceptor = TlsAcceptor::from(Arc::new(config));
 
     // Bind the TCP listener to port 443 (HTTPS)
-    let listener = TcpListener::bind("0.0.0.0:443").await?;
-    println!("HTTPS server listening on port 443");
+    let listener = TcpListener::bind("0.0.0.0:39001").await?;
+    println!("HTTPS server listening on port 39001");
 
     loop {
         // Accept new TCP connections
