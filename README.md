@@ -14,6 +14,8 @@ The HTTPS listener is now fully implemented with:
 
 ⚠️ **Seeing certificate errors?** See [CERT_EXCHANGE_TROUBLESHOOTING.md](CERT_EXCHANGE_TROUBLESHOOTING.md) - browser errors are expected!
 
+💡 **Running peers on different ports?** See [PEER_PORT_HEADER.md](PEER_PORT_HEADER.md) for `X-Peer-Port` header usage.
+
 ---
 
 ## Project Roadmap

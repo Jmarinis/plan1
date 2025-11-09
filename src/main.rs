@@ -75,21 +75,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Ok(mut stream) => {
                     println!("TLS connection established from {}", client_ip);
                     
-                    // Initiate reverse connection to verify peer's certificate
-                    println!("Initiating reverse connection to {}:39001", client_ip);
-                    match peer_client::connect_to_peer(&client_ip.to_string(), 39001, true).await {
-                        Ok(_) => println!("✓ Mutual trust established with {}", client_ip),
-                        Err(e) => println!("⚠ Reverse connection failed: {}. Continuing anyway...", e),
-                    }
-
-                    // Example: Read from the stream (you can write to it as well)
+                    // Read the request first to check for custom port header
                     let mut buf = [0u8; 1024];
                     match stream.read(&mut buf).await {
                 Ok(n) if n > 0 => {
-                            println!("Received:\n{}", String::from_utf8_lossy(&buf[..n]));
-
-                            // Parse the HTTP request to extract the path
+                            // Parse the HTTP request
                             let request = String::from_utf8_lossy(&buf[..n]);
+                            println!("Received request from {}", client_ip);
+                            
+                            // Extract peer port from X-Peer-Port header (default 39001)
+                            let peer_port = extract_peer_port(&request).unwrap_or(39001);
+                            
+                            // Initiate reverse connection to verify peer's certificate
+                            println!("Initiating reverse connection to {}:{}", client_ip, peer_port);
+                            match peer_client::connect_to_peer(&client_ip.to_string(), peer_port, true).await {
+                                Ok(_) => println!("✓ Mutual trust established with {}:{}", client_ip, peer_port),
+                                Err(e) => println!("⚠ Reverse connection failed: {}. Continuing anyway...", e),
+                            }
+                            
+                            // Extract the path
                             let path = extract_path(&request).unwrap_or_else(|| "/".to_string());
 
                             // Build response with the path
@@ -158,6 +162,20 @@ fn extract_host(request: &str) -> Option<String> {
             let host = line[5..].trim();
             // Remove port if present and return just hostname/IP
             return Some(host.split(':').next()?.to_string());
+        }
+    }
+    None
+}
+
+fn extract_peer_port(request: &str) -> Option<u16> {
+    // Look for X-Peer-Port: header in the HTTP request
+    // This allows clients to indicate which port their peer server is running on
+    for line in request.lines() {
+        if line.to_lowercase().starts_with("x-peer-port:") {
+            let port_str = line[13..].trim();
+            if let Ok(port) = port_str.parse::<u16>() {
+                return Some(port);
+            }
         }
     }
     None
