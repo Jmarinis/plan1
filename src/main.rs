@@ -44,6 +44,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Upgrade the TCP connection to TLS
         let acceptor = acceptor.clone();
         tokio::spawn(async move {
+            // Try to peek at the first few bytes to detect HTTP vs HTTPS
+            let mut peek_buf = [0u8; 5];
+            let is_http = if let Ok(n) = stream.peek(&mut peek_buf).await {
+                // HTTP requests start with methods like "GET ", "POST", "PUT ", etc.
+                // TLS handshake starts with 0x16 (handshake record type)
+                n >= 4 && peek_buf[0] != 0x16 && 
+                (
+                    peek_buf.starts_with(b"GET ") ||
+                    peek_buf.starts_with(b"POST") ||
+                    peek_buf.starts_with(b"PUT ") ||
+                    peek_buf.starts_with(b"HEAD") ||
+                    peek_buf.starts_with(b"DELE")
+                )
+            } else {
+                false
+            };
+
+            if is_http {
+                // Handle plain HTTP request - send redirect to HTTPS
+                println!("Plain HTTP request detected from {}, sending redirect", client_ip);
+                if let Err(e) = handle_http_redirect(stream, addr).await {
+                    println!("Error handling HTTP redirect: {:?}", e);
+                }
+                return;
+            }
+
             let tls_stream = acceptor.accept(stream).await;
             match tls_stream {
                 Ok(mut stream) => {
@@ -81,6 +107,60 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         });
     }
+}
+
+async fn handle_http_redirect(mut stream: tokio::net::TcpStream, addr: std::net::SocketAddr) -> Result<(), Box<dyn std::error::Error>> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    
+    // Read the HTTP request
+    let mut buf = [0u8; 1024];
+    let n = stream.read(&mut buf).await?;
+    if n == 0 {
+        return Ok(());
+    }
+    
+    let request = String::from_utf8_lossy(&buf[..n]);
+    let path = extract_path(&request).unwrap_or_else(|| "/".to_string());
+    
+    // Get the host from the request or use the server's IP
+    let host = extract_host(&request).unwrap_or_else(|| {
+        addr.ip().to_string()
+    });
+    
+    // Build HTTPS redirect URL
+    let redirect_url = format!("https://{}:39001{}", host, path);
+    
+    // Send 301 Moved Permanently redirect
+    let response = format!(
+        "HTTP/1.1 301 Moved Permanently\r\n\
+         Location: {}\r\n\
+         Content-Type: text/html\r\n\
+         Content-Length: {}\r\n\
+         Connection: close\r\n\
+         \r\n\
+         <html><body><h1>301 Moved Permanently</h1><p>This resource has moved to <a href=\"{}\">HTTPS</a>.</p></body></html>",
+        redirect_url,
+        redirect_url.len() + 114, // Length of HTML content
+        redirect_url
+    );
+    
+    stream.write_all(response.as_bytes()).await?;
+    stream.flush().await?;
+    
+    println!("Redirected HTTP request to: {}", redirect_url);
+    Ok(())
+}
+
+fn extract_host(request: &str) -> Option<String> {
+    // Look for Host: header in the HTTP request
+    for line in request.lines() {
+        if line.to_lowercase().starts_with("host:") {
+            let host = line[5..].trim();
+            // Remove port if present and return just hostname/IP
+            return Some(host.split(':').next()?.to_string());
+        }
+    }
+    None
 }
 
 fn extract_path(request: &str) -> Option<String> {

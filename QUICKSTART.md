@@ -7,6 +7,7 @@ Your application now automatically handles TLS certificates for peer-to-peer con
 1. **Auto-generates certificates** on first run (stored in `certs/`)
 2. **Trust-On-First-Use (TOFU)** - automatically trusts new peer certificates
 3. **Certificate pinning** - verifies returning peers match their stored fingerprints
+4. **Bidirectional trust** - when receiving a connection, automatically connects back to establish mutual trust
 
 ## Running Your Server
 
@@ -57,10 +58,18 @@ The `CertificateUnknown` error you were seeing is **expected behavior** with sel
 
 For high-security scenarios, you can verify fingerprints out-of-band (phone, secure message) before trusting.
 
+## Bidirectional Trust
+
+When a peer connects to you:
+1. Your server accepts the connection
+2. **Automatically initiates a reverse connection** to the peer
+3. Both peers exchange and verify certificates
+4. Mutual trust is established
+
+This ensures both peers trust each other, not just one-way trust.
+
 ## Next Steps
 
-See `TOFU_README.md` for:
-- Detailed architecture
-- Client connection examples
-- Security considerations
-- Troubleshooting guide
+- `BIDIRECTIONAL_TRUST.md` - How mutual trust negotiation works
+- `TOFU_README.md` - Detailed TOFU architecture and security
+- Test with two peers on different machines using `curl -k https://peer-ip:39001/test`
