@@ -95,7 +95,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             
                             let connections_clone = connections_http.clone();
                             tokio::spawn(async move {
-                                if let Err(e) = handle_http_monitor_dashboard(stream, &connections_clone).await {
+                                if let Err(e) = handle_http_monitor_dashboard(stream, client_ip, &connections_clone).await {
                                     log!("[ERROR] Monitor dashboard request failed: {:?}", e);
                                 }
                             });
@@ -282,10 +282,68 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 async fn handle_http_monitor_dashboard(
     mut stream: tokio::net::TcpStream,
+    client_ip: IpAddr,
     connections: &Arc<RwLock<HashMap<String, ConnectionInfo>>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use tokio::io::AsyncWriteExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     
+    // Read the HTTP request to determine the path
+    let mut buf = [0u8; 1024];
+    let n = stream.read(&mut buf).await?;
+    if n == 0 {
+        return Ok(());
+    }
+    
+    let request = String::from_utf8_lossy(&buf[..n]);
+    let path = extract_path(&request).unwrap_or_else(|| "/".to_string());
+    
+    // Handle /initiate endpoint
+    if path == "/initiate" {
+        log!("[INITIATE] Certificate exchange initiation requested from {}", client_ip);
+        
+        // Trigger certificate exchange with the requesting peer
+        let peer_port = 39001; // Default HTTPS port
+        let peer_key = format!("{}:{}", client_ip, peer_port);
+        
+        let connection_succeeded = peer_client::connect_to_peer(&client_ip.to_string(), peer_port, true).await.is_ok();
+        
+        if connection_succeeded {
+            log!("[INITIATE] ✓ Successfully connected to peer: {}", peer_key);
+            
+            // Add to connections tracking
+            let now_utc = time::OffsetDateTime::now_utc();
+            let timestamp = now_utc.format(&time::format_description::well_known::Rfc3339)
+                .unwrap_or_else(|_| String::from("unknown"));
+            
+            let mut conns = connections.write().await;
+            conns.entry(peer_key.clone())
+                .or_insert_with(|| {
+                    ConnectionInfo {
+                        hostname: format!("peer-{}", client_ip),
+                        ip_address: client_ip.to_string(),
+                        status: "Connected".to_string(),
+                        connected_at: timestamp.clone(),
+                        last_message: "Initiated via /initiate".to_string(),
+                        last_message_time: timestamp,
+                        request_count: 1,
+                        verified: true,
+                    }
+                });
+            log!("[INITIATE] Added connection: {} (Total: {})", peer_key, conns.len());
+        } else {
+            log!("[INITIATE] ⚠ Failed to connect to peer {}: connection error", peer_key);
+        }
+        
+        // Redirect to dashboard
+        let redirect_response = "HTTP/1.1 303 See Other\r\nLocation: /\r\nContent-Length: 0\r\n\r\n";
+        stream.write_all(redirect_response.as_bytes()).await?;
+        stream.flush().await?;
+        
+        log!("[INITIATE] Redirecting to dashboard");
+        return Ok(());
+    }
+    
+    // Serve dashboard for root path
     log!("[MONITOR] Serving HTML dashboard");
     
     // Get connection data
