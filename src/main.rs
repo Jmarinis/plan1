@@ -31,45 +31,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     let acceptor = TlsAcceptor::from(Arc::new(config));
 
-    // Bind the TCP listener to port 443 (HTTPS)
-    let listener = TcpListener::bind("0.0.0.0:39001").await?;
-    println!("HTTPS server listening on port 39001");
+    // Bind HTTP listener on port 39000 (for initial requests)
+    let http_listener = TcpListener::bind("0.0.0.0:39000").await?;
+    println!("HTTP server listening on port 39000 (initial requests only)");
+    
+    // Bind HTTPS listener on port 39001 (for secure communication)
+    let https_listener = TcpListener::bind("0.0.0.0:39001").await?;
+    println!("HTTPS server listening on port 39001 (all subsequent requests)");
 
+    // Spawn HTTP listener task
+    let _http_task = tokio::spawn(async move {
+        loop {
+            match http_listener.accept().await {
+                Ok((stream, addr)) => {
+                    let client_ip = addr.ip();
+                    println!("\n[HTTP] New connection from {} (port: {})", client_ip, addr.port());
+                    
+                    tokio::spawn(async move {
+                        if let Err(e) = handle_http_initial(stream, addr).await {
+                            println!("[ERROR] HTTP request handling failed: {:?}", e);
+                        }
+                    });
+                }
+                Err(e) => println!("[ERROR] HTTP listener error: {:?}", e),
+            }
+        }
+    });
+
+    // Handle HTTPS listener in main loop
     loop {
-        // Accept new TCP connections
-        let (stream, addr) = listener.accept().await?;
+        // Accept new HTTPS connections
+        let (stream, addr) = https_listener.accept().await?;
         let client_ip = addr.ip();
-        println!("\n[CONN] New connection from {} (port: {})", client_ip, addr.port());
+        println!("\n[HTTPS] New connection from {} (port: {})", client_ip, addr.port());
 
         // Upgrade the TCP connection to TLS
         let acceptor = acceptor.clone();
         tokio::spawn(async move {
-            // Try to peek at the first few bytes to detect HTTP vs HTTPS
-            let mut peek_buf = [0u8; 5];
-            let is_http = if let Ok(n) = stream.peek(&mut peek_buf).await {
-                // HTTP requests start with methods like "GET ", "POST", "PUT ", etc.
-                // TLS handshake starts with 0x16 (handshake record type)
-                n >= 4 && peek_buf[0] != 0x16 && 
-                (
-                    peek_buf.starts_with(b"GET ") ||
-                    peek_buf.starts_with(b"POST") ||
-                    peek_buf.starts_with(b"PUT ") ||
-                    peek_buf.starts_with(b"HEAD") ||
-                    peek_buf.starts_with(b"DELE")
-                )
-            } else {
-                false
-            };
-
-            if is_http {
-                // Handle plain HTTP request - send redirect to HTTPS
-                println!("[HTTP] Plain HTTP detected from {}, sending 301 redirect", client_ip);
-                if let Err(e) = handle_http_redirect(stream, addr).await {
-                    println!("[ERROR] HTTP redirect failed: {:?}", e);
-                }
-                return;
-            }
-            
             println!("[TLS] Starting TLS handshake with {}", client_ip);
 
             let tls_stream = acceptor.accept(stream).await;
@@ -128,7 +126,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-async fn handle_http_redirect(mut stream: tokio::net::TcpStream, addr: std::net::SocketAddr) -> Result<(), Box<dyn std::error::Error>> {
+async fn handle_http_initial(mut stream: tokio::net::TcpStream, addr: std::net::SocketAddr) -> Result<(), Box<dyn std::error::Error>> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     
     // Read the HTTP request
@@ -146,27 +144,42 @@ async fn handle_http_redirect(mut stream: tokio::net::TcpStream, addr: std::net:
         addr.ip().to_string()
     });
     
-    // Build HTTPS redirect URL
-    let redirect_url = format!("https://{}:39001{}", host, path);
+    // Get our certificate fingerprint
+    let fingerprint = cert_manager::get_cert_fingerprint()?;
     
-    // Send 301 Moved Permanently redirect
+    // Build HTTPS URL for future requests
+    let https_url = format!("https://{}:39001", host);
+    
+    // Build JSON response with initial data and HTTPS upgrade information
+    let body = serde_json::json!({
+        "message": "Initial connection successful",
+        "path": path,
+        "https_endpoint": https_url,
+        "server_fingerprint": fingerprint,
+        "note": "Future requests should use HTTPS"
+    });
+    let body_str = body.to_string();
+    
+    // Send 200 OK with upgrade information
     let response = format!(
-        "HTTP/1.1 301 Moved Permanently\r\n\
-         Location: {}\r\n\
-         Content-Type: text/html\r\n\
+        "HTTP/1.1 200 OK\r\n\
+         Content-Type: application/json\r\n\
          Content-Length: {}\r\n\
+         X-HTTPS-Endpoint: {}\r\n\
+         X-Server-Fingerprint: {}\r\n\
          Connection: close\r\n\
          \r\n\
-         <html><body><h1>301 Moved Permanently</h1><p>This resource has moved to <a href=\"{}\">HTTPS</a>.</p></body></html>",
-        redirect_url,
-        redirect_url.len() + 114, // Length of HTML content
-        redirect_url
+         {}",
+        body_str.len(),
+        https_url,
+        fingerprint,
+        body_str
     );
     
     stream.write_all(response.as_bytes()).await?;
     stream.flush().await?;
     
-    println!("[HTTP] ✓ Redirected to: {}", redirect_url);
+    println!("[HTTP] ✓ Initial request served, client should upgrade to HTTPS: {}", https_url);
     Ok(())
 }
 
