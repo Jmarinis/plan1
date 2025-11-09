@@ -37,10 +37,15 @@ impl PeerClient {
         // Connect TCP
         let stream = TcpStream::connect(&addr_str).await?;
         
-        // Attempt TLS handshake
-        // Note: This basic implementation will fail with self-signed certs
-        // In production, you'd implement a custom ServerCertVerifier
-        let domain = rustls::ServerName::try_from(address)?;
+        // Attempt TLS handshake with custom cert verifier
+        let domain = if let Ok(ip) = address.parse::<std::net::IpAddr>() {
+            // For IP addresses, use IpAddress variant
+            rustls::ServerName::IpAddress(ip)
+        } else {
+            // For hostnames, use DnsName
+            rustls::ServerName::try_from(address)
+                .map_err(|e| format!("Invalid server name: {:?}", e))?
+        };
         
         match self.connector.connect(domain, stream).await {
             Ok(mut tls_stream) => {

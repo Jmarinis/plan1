@@ -29,9 +29,18 @@ On subsequent runs, it will reuse the existing certificate.
 ## Testing Locally
 
 1. **Start the server**: `cargo run`
-2. **Connect from browser**: `https://localhost:39001/test`
+2. **Connect from browser**: You can use either:
+   - `http://localhost:39001/test` (automatically redirects to HTTPS)
+   - `https://localhost:39001/test` (direct HTTPS)
 3. **Accept the security warning** (self-signed certificate)
 4. You should see: `Hello, World! Path: /test`
+
+### HTTP-to-HTTPS Redirect ✨
+
+The server now automatically detects plain HTTP requests and redirects them to HTTPS:
+- No need to remember to use `https://`
+- Works with browsers and curl
+- Preserves the path (e.g., `/test` → `https://localhost:39001/test`)
 
 ## Files Created
 

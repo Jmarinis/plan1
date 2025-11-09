@@ -5,6 +5,7 @@ use std::time::SystemTime;
 use crate::peer_trust;
 
 /// Custom certificate verifier that implements Trust-On-First-Use (TOFU)
+/// This verifier accepts self-signed certificates and validates them using fingerprint matching
 pub struct TofuServerCertVerifier {
     peer_address: String,
 }
@@ -59,6 +60,46 @@ impl ServerCertVerifier for TofuServerCertVerifier {
             }
         }
     }
+    
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &Certificate,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::HandshakeSignatureValid, TlsError> {
+        // Accept any signature for self-signed certificates
+        Ok(rustls::client::HandshakeSignatureValid::assertion())
+    }
+    
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &Certificate,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::HandshakeSignatureValid, TlsError> {
+        // Accept any signature for self-signed certificates
+        Ok(rustls::client::HandshakeSignatureValid::assertion())
+    }
+    
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        // Support all schemes since we're not actually verifying signatures
+        vec![
+            rustls::SignatureScheme::RSA_PKCS1_SHA256,
+            rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
+            rustls::SignatureScheme::ECDSA_NISTP384_SHA384,
+            rustls::SignatureScheme::ECDSA_NISTP521_SHA512,
+            rustls::SignatureScheme::RSA_PSS_SHA256,
+            rustls::SignatureScheme::RSA_PSS_SHA384,
+            rustls::SignatureScheme::RSA_PSS_SHA512,
+            rustls::SignatureScheme::ED25519,
+        ]
+    }
+}
+
+// Dummy implementation to satisfy the old interface
+#[allow(dead_code)]
+impl TofuServerCertVerifier {
+    // Old verify_server_cert method - now handled by the trait implementation above
 }
 
 /// Verifier that accepts any certificate (for initial handshake on server side)

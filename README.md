@@ -8,8 +8,11 @@ The HTTPS listener is now fully implemented with:
 - ✅ Trust-On-First-Use (TOFU) certificate handling
 - ✅ Bidirectional trust negotiation between peers
 - ✅ Certificate pinning and verification
+- ✅ **HTTP-to-HTTPS automatic redirect** (NEW!)
 
 **See [QUICKSTART.md](QUICKSTART.md) for usage** or [IMPLEMENTATION_SUMMARY.md](IMPLEMENTATION_SUMMARY.md) for details.
+
+⚠️ **Seeing certificate errors?** See [CERT_EXCHANGE_TROUBLESHOOTING.md](CERT_EXCHANGE_TROUBLESHOOTING.md) - browser errors are expected!
 
 ---
 
