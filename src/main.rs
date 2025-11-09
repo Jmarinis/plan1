@@ -56,32 +56,53 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Bind HTTPS listener on port 39001 (for secure communication)
     let https_listener = TcpListener::bind("0.0.0.0:39001").await?;
     println!("HTTPS server listening on port 39001 (all subsequent requests)");
+    println!("\nPress Ctrl-C to shutdown gracefully\n");
+
+    // Setup Ctrl-C handler
+    let shutdown = Arc::new(tokio::sync::Notify::new());
+    let shutdown_clone = shutdown.clone();
+    
+    tokio::spawn(async move {
+        tokio::signal::ctrl_c().await.expect("Failed to listen for Ctrl-C");
+        println!("\n\n[SHUTDOWN] Received Ctrl-C, shutting down gracefully...");
+        shutdown_clone.notify_waiters();
+    });
 
     // Spawn HTTP listener task
     let verified_peers_http = verified_peers.clone();
+    let shutdown_http = shutdown.clone();
     let _http_task = tokio::spawn(async move {
         loop {
-            match http_listener.accept().await {
-                Ok((stream, addr)) => {
-                    let client_ip = addr.ip();
-                    println!("\n[HTTP] New connection from {} (port: {})", client_ip, addr.port());
-                    
-                    let verified_peers_clone = verified_peers_http.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = handle_http_initial(stream, addr, verified_peers_clone).await {
-                            println!("[ERROR] HTTP request handling failed: {:?}", e);
+            tokio::select! {
+                result = http_listener.accept() => {
+                    match result {
+                        Ok((stream, addr)) => {
+                            let client_ip = addr.ip();
+                            println!("\n[HTTP] New connection from {} (port: {})", client_ip, addr.port());
+                            
+                            let verified_peers_clone = verified_peers_http.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) = handle_http_initial(stream, addr, verified_peers_clone).await {
+                                    println!("[ERROR] HTTP request handling failed: {:?}", e);
+                                }
+                            });
                         }
-                    });
+                        Err(e) => println!("[ERROR] HTTP listener error: {:?}", e),
+                    }
                 }
-                Err(e) => println!("[ERROR] HTTP listener error: {:?}", e),
+                _ = shutdown_http.notified() => {
+                    println!("[SHUTDOWN] HTTP listener shutting down");
+                    break;
+                }
             }
         }
     });
 
     // Handle HTTPS listener in main loop
     loop {
-        // Accept new HTTPS connections
-        let (stream, addr) = https_listener.accept().await?;
+        tokio::select! {
+            result = https_listener.accept() => {
+                let (stream, addr) = result?;
         let client_ip = addr.ip();
         println!("\n[HTTPS] New connection from {} (port: {})", client_ip, addr.port());
 
@@ -208,7 +229,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 },
             }
         });
+            }
+            _ = shutdown.notified() => {
+                println!("[SHUTDOWN] HTTPS listener shutting down");
+                break;
+            }
+        }
     }
+    
+    println!("[SHUTDOWN] Server stopped. Goodbye!");
+    Ok(())
 }
 
 async fn handle_http_initial(
