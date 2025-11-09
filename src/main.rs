@@ -185,9 +185,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         
                                         // Exchange peer lists after successful verification
                                         let verified_peers_clone = verified_peers_https.clone();
+                                        let connections_clone2 = connections_clone.clone();
                                         let client_ip_str = client_ip.to_string();
                                         tokio::spawn(async move {
-                                            if let Err(e) = exchange_peer_lists(&client_ip_str, peer_port, &verified_peers_clone).await {
+                                            if let Err(e) = exchange_peer_lists(&client_ip_str, peer_port, &verified_peers_clone, &connections_clone2).await {
                                                 log!("[MESH] Failed to exchange peer lists with {}: {}", client_ip_str, e);
                                             }
                                         });
@@ -438,6 +439,7 @@ async fn exchange_peer_lists(
     peer_ip: &str,
     peer_port: u16,
     verified_peers: &Arc<RwLock<HashSet<String>>>,
+    connections: &Arc<RwLock<HashMap<String, ConnectionInfo>>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     log!("[MESH] Exchanging peer lists with {}:{}", peer_ip, peer_port);
     
@@ -497,7 +499,9 @@ async fn exchange_peer_lists(
         
         // Spawn connection attempt
         let verified_peers_clone = verified_peers.clone();
+        let connections_clone = connections.clone();
         let peer_addr_clone = peer_addr.clone();
+        let new_peer_ip_clone = new_peer_ip.clone();
         tokio::spawn(async move {
             let connection_succeeded = match peer_client::connect_to_peer(&new_peer_ip, new_peer_port, true).await {
                 Ok(_) => {
@@ -510,8 +514,28 @@ async fn exchange_peer_lists(
                 }
             };
             
-            // Remove from verified peers if connection failed
-            if !connection_succeeded {
+            if connection_succeeded {
+                // Add to connections tracking
+                let now_utc = time::OffsetDateTime::now_utc();
+                let timestamp = now_utc.format(&time::format_description::well_known::Rfc3339)
+                    .unwrap_or_else(|_| String::from("unknown"));
+                
+                let mut conns = connections_clone.write().await;
+                conns.entry(peer_addr_clone.clone())
+                    .or_insert_with(|| {
+                        ConnectionInfo {
+                            hostname: format!("peer-{}", new_peer_ip_clone),
+                            ip_address: new_peer_ip_clone.clone(),
+                            status: "Connected (Mesh)".to_string(),
+                            connected_at: timestamp.clone(),
+                            last_message: "Mesh discovery".to_string(),
+                            last_message_time: timestamp,
+                            request_count: 0,
+                            verified: true,
+                        }
+                    });
+            } else {
+                // Remove from verified peers if connection failed
                 let mut peers = verified_peers_clone.write().await;
                 peers.remove(&peer_addr_clone);
             }
