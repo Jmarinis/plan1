@@ -380,7 +380,7 @@ async fn handle_http_monitor_dashboard(
     </style>
 </head>
 <body>
-    <h1>🌐 Peer Monitor Dashboard</h1>
+    <h1>Peer Monitor</h1>
     <div class="info">
         <strong>Total Connections:</strong> {}<br>
         <strong>Last Updated:</strong> {} UTC<br>
