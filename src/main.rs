@@ -129,6 +129,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn handle_http_initial(mut stream: tokio::net::TcpStream, addr: std::net::SocketAddr) -> Result<(), Box<dyn std::error::Error>> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     
+    let client_ip = addr.ip();
+    
     // Read the HTTP request
     let mut buf = [0u8; 1024];
     let n = stream.read(&mut buf).await?;
@@ -137,12 +139,32 @@ async fn handle_http_initial(mut stream: tokio::net::TcpStream, addr: std::net::
     }
     
     let request = String::from_utf8_lossy(&buf[..n]);
+    let first_line = request.lines().next().unwrap_or("<empty>");
+    println!("[HTTP] Request from {}: {}", client_ip, first_line);
+    
     let path = extract_path(&request).unwrap_or_else(|| "/".to_string());
     
     // Get the host from the request or use the server's IP
     let host = extract_host(&request).unwrap_or_else(|| {
         addr.ip().to_string()
     });
+    
+    // Extract peer port from X-Peer-Port header (default 39001)
+    let peer_port = extract_peer_port(&request).unwrap_or(39001);
+    
+    // Initiate reverse connection to verify peer's certificate
+    println!("[PEER] Initiating reverse connection to {}:{}", client_ip, peer_port);
+    let peer_verified = match peer_client::connect_to_peer(&client_ip.to_string(), peer_port, true).await {
+        Ok(_) => {
+            println!("[PEER] ✓ Mutual trust established with {}:{}", client_ip, peer_port);
+            true
+        }
+        Err(e) => {
+            println!("[PEER] ⚠ Reverse connection failed: {}", e);
+            println!("[PEER] Note: This is normal if {} is not running a peer server", client_ip);
+            false
+        }
+    };
     
     // Get our certificate fingerprint
     let fingerprint = cert_manager::get_cert_fingerprint()?;
@@ -156,6 +178,7 @@ async fn handle_http_initial(mut stream: tokio::net::TcpStream, addr: std::net::
         "path": path,
         "https_endpoint": https_url,
         "server_fingerprint": fingerprint,
+        "peer_verified": peer_verified,
         "note": "Future requests should use HTTPS"
     });
     let body_str = body.to_string();
@@ -167,12 +190,14 @@ async fn handle_http_initial(mut stream: tokio::net::TcpStream, addr: std::net::
          Content-Length: {}\r\n\
          X-HTTPS-Endpoint: {}\r\n\
          X-Server-Fingerprint: {}\r\n\
+         X-Peer-Verified: {}\r\n\
          Connection: close\r\n\
          \r\n\
          {}",
         body_str.len(),
         https_url,
         fingerprint,
+        peer_verified,
         body_str
     );
     
