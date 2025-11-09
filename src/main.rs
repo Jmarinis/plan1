@@ -182,6 +182,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let connection_succeeded = match peer_client::connect_to_peer(&client_ip.to_string(), peer_port, true).await {
                                     Ok(_) => {
                                         log!("[PEER] ✓ Mutual trust established with {}", peer_key);
+                                        
+                                        // Exchange peer lists after successful verification
+                                        let verified_peers_clone = verified_peers_https.clone();
+                                        let client_ip_str = client_ip.to_string();
+                                        tokio::spawn(async move {
+                                            if let Err(e) = exchange_peer_lists(&client_ip_str, peer_port, &verified_peers_clone).await {
+                                                log!("[MESH] Failed to exchange peer lists with {}: {}", client_ip_str, e);
+                                            }
+                                        });
+                                        
                                         true
                                     }
                                     Err(e) => {
@@ -421,6 +431,94 @@ fn truncate(s: &str, max_len: usize) -> String {
     } else {
         format!("{}...", &s[..max_len])
     }
+}
+
+// Exchange peer lists and discover new peers for mesh networking
+async fn exchange_peer_lists(
+    peer_ip: &str,
+    peer_port: u16,
+    verified_peers: &Arc<RwLock<HashSet<String>>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    log!("[MESH] Exchanging peer lists with {}:{}", peer_ip, peer_port);
+    
+    // Get our current verified peer list
+    let our_peers: Vec<String> = {
+        let peers = verified_peers.read().await;
+        peers.iter().cloned().collect()
+    };
+    
+    log!("[MESH] We have {} verified peers to share", our_peers.len());
+    
+    // Load trusted peers from file to get their peer lists
+    let trusted = peer_trust::TrustedPeers::load()?;
+    let all_trusted_peers = trusted.list_peers();
+    
+    // Build list of peer addresses to share (exclude the peer we're talking to)
+    let current_peer = format!("{}:{}", peer_ip, peer_port);
+    let peers_to_share: Vec<String> = all_trusted_peers
+        .iter()
+        .map(|(addr, _)| addr.clone())
+        .filter(|addr| addr != &current_peer)
+        .collect();
+    
+    log!("[MESH] Sharing {} trusted peer addresses", peers_to_share.len());
+    
+    // For each shared peer address, try to connect if not already verified
+    for peer_addr in peers_to_share {
+        // Parse IP and port
+        let parts: Vec<&str> = peer_addr.split(':').collect();
+        if parts.len() != 2 {
+            continue;
+        }
+        
+        let new_peer_ip = parts[0].to_string();
+        let new_peer_port = match parts[1].parse::<u16>() {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        
+        // Skip if already verified
+        {
+            let peers = verified_peers.read().await;
+            if peers.contains(&peer_addr) {
+                continue;
+            }
+        }
+        
+        // Try to connect to this new peer
+        log!("[MESH] Discovered new peer from {}: {}", current_peer, peer_addr);
+        log!("[MESH] Attempting to connect to {}", peer_addr);
+        
+        // Add to verified peers before connecting to prevent loops
+        {
+            let mut peers = verified_peers.write().await;
+            peers.insert(peer_addr.clone());
+        }
+        
+        // Spawn connection attempt
+        let verified_peers_clone = verified_peers.clone();
+        let peer_addr_clone = peer_addr.clone();
+        tokio::spawn(async move {
+            let connection_succeeded = match peer_client::connect_to_peer(&new_peer_ip, new_peer_port, true).await {
+                Ok(_) => {
+                    log!("[MESH] ✓ Successfully connected to discovered peer: {}", peer_addr_clone);
+                    true
+                }
+                Err(e) => {
+                    log!("[MESH] ⚠ Failed to connect to discovered peer {}: {}", peer_addr_clone, e.to_string());
+                    false
+                }
+            };
+            
+            // Remove from verified peers if connection failed
+            if !connection_succeeded {
+                let mut peers = verified_peers_clone.write().await;
+                peers.remove(&peer_addr_clone);
+            }
+        });
+    }
+    
+    Ok(())
 }
 
 fn extract_peer_port(request: &str) -> Option<u16> {
