@@ -39,12 +39,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // Example: Read from the stream (you can write to it as well)
                     let mut buf = [0u8; 1024];
                     match stream.read(&mut buf).await {
-                        Ok(n) if n > 0 => {
-                            println!("Received: {:?}", &buf[..n]);
+                Ok(n) if n > 0 => {
+                            println!("Received:\n{}", String::from_utf8_lossy(&buf[..n]));
 
-                            // Optionally, write back a response
-                            let response = b"HTTP/1.1 200 OK\r\n\r\nHello, World!";
-                            if let Err(e) = stream.write_all(response).await {
+                            // Parse the HTTP request to extract the path
+                            let request = String::from_utf8_lossy(&buf[..n]);
+                            let path = extract_path(&request).unwrap_or_else(|| "/".to_string());
+
+                            // Build response with the path
+                            let body = format!("Hello, World! Path: {}", path);
+                            let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}", body.len(), body);
+                            if let Err(e) = stream.write_all(response.as_bytes()).await {
                                 println!("Error writing to stream: {:?}", e);
                             }
                         }
@@ -55,6 +60,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Err(e) => println!("TLS handshake failed: {:?}", e),
             }
         });
+    }
+}
+
+fn extract_path(request: &str) -> Option<String> {
+    // Parse the first line of the HTTP request: "METHOD /path HTTP/version"
+    let first_line = request.lines().next()?;
+    let parts: Vec<&str> = first_line.split_whitespace().collect();
+    if parts.len() >= 2 {
+        Some(parts[1].to_string())
+    } else {
+        None
     }
 }
 
