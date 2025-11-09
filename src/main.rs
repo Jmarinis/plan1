@@ -218,6 +218,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     .unwrap_or_else(|_| String::from("unknown"));
                                 
                                 let mut conns = connections_clone.write().await;
+                                let is_new = !conns.contains_key(&peer_key);
                                 conns.entry(peer_key.clone())
                                     .and_modify(|info| {
                                         info.request_count += 1;
@@ -237,6 +238,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             verified: peer_verified,
                                         }
                                     });
+                                if is_new {
+                                    log!("[TRACK] Added new connection: {} (Total: {})", peer_key, conns.len());
+                                } else {
+                                    log!("[TRACK] Updated connection: {} (Total: {})", peer_key, conns.len());
+                                }
                             }
 
                             // Build response with the path
@@ -285,6 +291,7 @@ async fn handle_http_monitor_dashboard(
     // Get connection data
     let conns = connections.read().await;
     let mut conn_list: Vec<ConnectionInfo> = conns.values().cloned().collect();
+    log!("[MONITOR] Found {} connections in HashMap", conn_list.len());
     conn_list.sort_by(|a, b| b.last_message_time.cmp(&a.last_message_time));
     
     // Build HTML table rows
