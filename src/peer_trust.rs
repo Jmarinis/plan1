@@ -22,9 +22,25 @@ impl TrustedPeers {
     pub fn load() -> Result<Self, Box<dyn std::error::Error>> {
         if Path::new(TRUSTED_PEERS_FILE).exists() {
             let file = File::open(TRUSTED_PEERS_FILE)?;
+            let metadata = file.metadata()?;
+            
+            // If file is empty or too small, return empty peers
+            if metadata.len() == 0 {
+                return Ok(TrustedPeers {
+                    peers: HashMap::new(),
+                });
+            }
+            
             let reader = BufReader::new(file);
-            let peers = serde_json::from_reader(reader)?;
-            Ok(peers)
+            match serde_json::from_reader(reader) {
+                Ok(peers) => Ok(peers),
+                Err(_) => {
+                    // If parsing fails, return empty peers (file might be corrupted)
+                    Ok(TrustedPeers {
+                        peers: HashMap::new(),
+                    })
+                }
+            }
         } else {
             Ok(TrustedPeers {
                 peers: HashMap::new(),

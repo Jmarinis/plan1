@@ -1,15 +1,25 @@
 use std::{fs, sync::Arc};
-use std::collections::HashSet;
+use std::collections::{HashSet, HashMap};
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 use rustls::{ServerConfig, Certificate, PrivateKey};
 use tokio_rustls::TlsAcceptor;
 use tokio::io::{AsyncReadExt, AsyncWriteExt}; // Import the async traits
+use serde::Serialize;
+use std::net::IpAddr;
 
 pub mod cert_manager;
 pub mod peer_trust;
 pub mod peer_client;
 pub mod cert_verifier;
+
+#[derive(Debug, Clone, Serialize)]
+struct ConnectionInfo {
+    peer: String,
+    connected_at: String,
+    request_count: usize,
+    verified: bool,
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -22,6 +32,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // Create shared state for tracking verified peers
     let verified_peers: Arc<RwLock<HashSet<String>>> = Arc::new(RwLock::new(HashSet::new()));
+    
+    // Create shared state for tracking active connections
+    let connections: Arc<RwLock<HashMap<String, ConnectionInfo>>> = Arc::new(RwLock::new(HashMap::new()));
     
     // Load TLS certificate and private key
     let certs = load_certs(cert_manager::get_cert_path())?;
@@ -74,6 +87,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Upgrade the TCP connection to TLS
         let acceptor = acceptor.clone();
+        let connections_clone = connections.clone();
+        let verified_peers_https = verified_peers.clone();
         tokio::spawn(async move {
             println!("[TLS] Starting TLS handshake with {}", client_ip);
 
@@ -91,21 +106,84 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let first_line = request.lines().next().unwrap_or("<empty>");
                             println!("[HTTP] Request from {}: {}", client_ip, first_line);
                             
-                            // Extract peer port from X-Peer-Port header (default 39001)
-                            let peer_port = extract_peer_port(&request).unwrap_or(39001);
-                            
-                            // Initiate reverse connection to verify peer's certificate
-                            println!("[PEER] Initiating reverse connection to {}:{}", client_ip, peer_port);
-                            match peer_client::connect_to_peer(&client_ip.to_string(), peer_port, true).await {
-                                Ok(_) => println!("[PEER] ✓ Mutual trust established with {}:{}", client_ip, peer_port),
-                                Err(e) => {
-                                    println!("[PEER] ⚠ Reverse connection failed: {}", e);
-                                    println!("[PEER] Note: This is normal if {} is not running a peer server", client_ip);
-                                }
-                            }
-                            
                             // Extract the path
                             let path = extract_path(&request).unwrap_or_else(|| "/".to_string());
+                            
+                            // Handle /monitor endpoint (localhost only)
+                            if path == "/monitor" {
+                                if is_localhost(&client_ip) {
+                                    if let Err(e) = handle_monitor_request(&mut stream, &connections_clone).await {
+                                        println!("[ERROR] Monitor request failed: {:?}", e);
+                                    }
+                                } else {
+                                    println!("[MONITOR] Rejected non-localhost request from {}", client_ip);
+                                    let response = "HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\nContent-Length: 36\r\n\r\nMonitor endpoint only for localhost";
+                                    let _ = stream.write_all(response.as_bytes()).await;
+                                }
+                                return;
+                            }
+                            
+                            // Extract peer port from X-Peer-Port header (default 39001)
+                            let peer_port = extract_peer_port(&request).unwrap_or(39001);
+                            let peer_key = format!("{}:{}", client_ip, peer_port);
+                            
+                            // Check if peer is already verified
+                            let already_verified = {
+                                let peers = verified_peers_https.read().await;
+                                peers.contains(&peer_key)
+                            };
+                            
+                            let peer_verified = if already_verified {
+                                println!("[PEER] Peer {} already verified, skipping certificate exchange", peer_key);
+                                true
+                            } else {
+                                // Add to verified peers BEFORE initiating connection to prevent infinite loop
+                                {
+                                    let mut peers = verified_peers_https.write().await;
+                                    peers.insert(peer_key.clone());
+                                }
+                                
+                                // Initiate reverse connection to verify peer's certificate
+                                println!("[PEER] Initiating reverse connection to {}", peer_key);
+                                let connection_succeeded = match peer_client::connect_to_peer(&client_ip.to_string(), peer_port, true).await {
+                                    Ok(_) => {
+                                        println!("[PEER] ✓ Mutual trust established with {}", peer_key);
+                                        true
+                                    }
+                                    Err(e) => {
+                                        println!("[PEER] ⚠ Reverse connection failed: {}", e.to_string());
+                                        println!("[PEER] Note: This is normal if {} is not running a peer server", client_ip);
+                                        false
+                                    }
+                                };
+                                
+                                // Remove from verified peers if connection failed
+                                if !connection_succeeded {
+                                    let mut peers = verified_peers_https.write().await;
+                                    peers.remove(&peer_key);
+                                }
+                                
+                                connection_succeeded
+                            };
+                            
+                            // Track connection
+                            {
+                                let mut conns = connections_clone.write().await;
+                                conns.entry(peer_key.clone())
+                                    .and_modify(|info| info.request_count += 1)
+                                    .or_insert_with(|| {
+                                        let now = std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .unwrap()
+                                            .as_secs();
+                                        ConnectionInfo {
+                                            peer: peer_key.clone(),
+                                            connected_at: now.to_string(),
+                                            request_count: 1,
+                                            verified: peer_verified,
+                                        }
+                                    });
+                            }
 
                             // Build response with the path
                             let body = format!("Hello, World! Path: {}", path);
@@ -176,6 +254,12 @@ async fn handle_http_initial(
         println!("[PEER] Peer {} already verified, skipping certificate exchange", peer_key);
         true
     } else {
+        // Add to verified peers BEFORE initiating connection to prevent infinite loop
+        {
+            let mut peers = verified_peers.write().await;
+            peers.insert(peer_key.clone());
+        }
+        
         // Initiate reverse connection to verify peer's certificate
         println!("[PEER] Initiating reverse connection to {}", peer_key);
         let connection_succeeded = match peer_client::connect_to_peer(&client_ip.to_string(), peer_port, true).await {
@@ -190,10 +274,10 @@ async fn handle_http_initial(
             }
         };
         
-        // Add to verified peers if successful
-        if connection_succeeded {
+        // Remove from verified peers if connection failed
+        if !connection_succeeded {
             let mut peers = verified_peers.write().await;
-            peers.insert(peer_key.clone());
+            peers.remove(&peer_key);
         }
         
         connection_succeeded
@@ -276,6 +360,50 @@ fn extract_path(request: &str) -> Option<String> {
     } else {
         None
     }
+}
+
+fn is_localhost(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(addr) => addr.is_loopback(),
+        IpAddr::V6(addr) => addr.is_loopback(),
+    }
+}
+
+async fn handle_monitor_request(
+    stream: &mut tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
+    connections: &Arc<RwLock<HashMap<String, ConnectionInfo>>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use tokio::io::AsyncWriteExt;
+    
+    println!("[MONITOR] Serving monitor request");
+    
+    // Get connection data
+    let conns = connections.read().await;
+    let conn_list: Vec<ConnectionInfo> = conns.values().cloned().collect();
+    
+    // Build JSON response
+    let body = serde_json::json!({
+        "total_connections": conn_list.len(),
+        "connections": conn_list
+    });
+    let body_str = body.to_string();
+    
+    // Send response
+    let response = format!(
+        "HTTP/1.1 200 OK\r\n\
+         Content-Type: application/json\r\n\
+         Content-Length: {}\r\n\
+         \r\n\
+         {}",
+        body_str.len(),
+        body_str
+    );
+    
+    stream.write_all(response.as_bytes()).await?;
+    stream.flush().await?;
+    
+    println!("[MONITOR] ✓ Monitor data sent");
+    Ok(())
 }
 
 fn load_certs(path: &str) -> Result<Vec<Certificate>, Box<dyn std::error::Error>> {
