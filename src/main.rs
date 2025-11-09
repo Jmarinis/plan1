@@ -4,11 +4,22 @@ use rustls::{ServerConfig, Certificate, PrivateKey};
 use tokio_rustls::TlsAcceptor;
 use tokio::io::{AsyncReadExt, AsyncWriteExt}; // Import the async traits
 
+mod cert_manager;
+mod peer_trust;
+mod peer_client;
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Ensure certificate exists (generate if needed)
+    cert_manager::ensure_certificate()?;
+    
+    // Display our certificate fingerprint
+    let fingerprint = cert_manager::get_cert_fingerprint()?;
+    println!("Our fingerprint: {}", fingerprint);
+    
     // Load TLS certificate and private key
-    let certs = load_certs("cert.pem")?;
-    let key = load_private_key("key.pem")?;
+    let certs = load_certs(cert_manager::get_cert_path())?;
+    let key = load_private_key(cert_manager::get_key_path())?;
 
     // Configure rustls server without client authentication
     let config = ServerConfig::builder()
