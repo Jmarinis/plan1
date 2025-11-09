@@ -6,7 +6,7 @@ use tokio::net::TcpListener;
 use rustls::{ServerConfig, Certificate, PrivateKey};
 use tokio_rustls::TlsAcceptor;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use plan1::{cert_manager, peer_client, peer_trust};
+use plan1::{cert_manager, peer_client};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

@@ -39,7 +39,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Accept new TCP connections
         let (stream, addr) = listener.accept().await?;
         let client_ip = addr.ip();
-        println!("New connection from {:?}", addr);
+        println!("\n[CONN] New connection from {} (port: {})", client_ip, addr.port());
 
         // Upgrade the TCP connection to TLS
         let acceptor = acceptor.clone();
@@ -63,17 +63,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             if is_http {
                 // Handle plain HTTP request - send redirect to HTTPS
-                println!("Plain HTTP request detected from {}, sending redirect", client_ip);
+                println!("[HTTP] Plain HTTP detected from {}, sending 301 redirect", client_ip);
                 if let Err(e) = handle_http_redirect(stream, addr).await {
-                    println!("Error handling HTTP redirect: {:?}", e);
+                    println!("[ERROR] HTTP redirect failed: {:?}", e);
                 }
                 return;
             }
+            
+            println!("[TLS] Starting TLS handshake with {}", client_ip);
 
             let tls_stream = acceptor.accept(stream).await;
             match tls_stream {
                 Ok(mut stream) => {
-                    println!("TLS connection established from {}", client_ip);
+                    println!("[TLS] ✓ Handshake successful with {}", client_ip);
                     
                     // Read the request first to check for custom port header
                     let mut buf = [0u8; 1024];
@@ -81,16 +83,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Ok(n) if n > 0 => {
                             // Parse the HTTP request
                             let request = String::from_utf8_lossy(&buf[..n]);
-                            println!("Received request from {}", client_ip);
+                            let first_line = request.lines().next().unwrap_or("<empty>");
+                            println!("[HTTP] Request from {}: {}", client_ip, first_line);
                             
                             // Extract peer port from X-Peer-Port header (default 39001)
                             let peer_port = extract_peer_port(&request).unwrap_or(39001);
                             
                             // Initiate reverse connection to verify peer's certificate
-                            println!("Initiating reverse connection to {}:{}", client_ip, peer_port);
+                            println!("[PEER] Initiating reverse connection to {}:{}", client_ip, peer_port);
                             match peer_client::connect_to_peer(&client_ip.to_string(), peer_port, true).await {
-                                Ok(_) => println!("✓ Mutual trust established with {}:{}", client_ip, peer_port),
-                                Err(e) => println!("⚠ Reverse connection failed: {}. Continuing anyway...", e),
+                                Ok(_) => println!("[PEER] ✓ Mutual trust established with {}:{}", client_ip, peer_port),
+                                Err(e) => {
+                                    println!("[PEER] ⚠ Reverse connection failed: {}", e);
+                                    println!("[PEER] Note: This is normal if {} is not running a peer server", client_ip);
+                                }
                             }
                             
                             // Extract the path
@@ -99,15 +105,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             // Build response with the path
                             let body = format!("Hello, World! Path: {}", path);
                             let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}", body.len(), body);
+                            println!("[HTTP] Sending 200 OK response for path: {}", path);
                             if let Err(e) = stream.write_all(response.as_bytes()).await {
-                                println!("Error writing to stream: {:?}", e);
+                                println!("[ERROR] Failed to write response: {:?}", e);
+                            } else {
+                                println!("[HTTP] ✓ Response sent successfully to {}", client_ip);
                             }
                         }
-                        Ok(_) => println!("Connection closed by client"),
-                        Err(e) => println!("Error reading from stream: {:?}", e),
+                        Ok(_) => println!("[CONN] Connection closed by {}", client_ip),
+                        Err(e) => println!("[ERROR] Read error from {}: {:?}", client_ip, e),
                     }
                 }
-                Err(e) => println!("TLS handshake failed: {:?}", e),
+                Err(e) => {
+                    println!("[TLS] ✗ Handshake failed with {}: {:?}", client_ip, e);
+                    println!("[TLS] Common causes:");
+                    println!("[TLS]   - Browser rejecting self-signed certificate (accept security warning)");
+                    println!("[TLS]   - Client doesn't have TOFU verifier (use Rust peer client)");
+                    println!("[TLS]   - Certificate mismatch");
+                },
             }
         });
     }
@@ -151,7 +166,7 @@ async fn handle_http_redirect(mut stream: tokio::net::TcpStream, addr: std::net:
     stream.write_all(response.as_bytes()).await?;
     stream.flush().await?;
     
-    println!("Redirected HTTP request to: {}", redirect_url);
+    println!("[HTTP] ✓ Redirected to: {}", redirect_url);
     Ok(())
 }
 

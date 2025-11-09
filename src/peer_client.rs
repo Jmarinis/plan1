@@ -32,10 +32,12 @@ impl PeerClient {
     
     pub async fn connect(&self, address: &str, port: u16) -> Result<(), Box<dyn std::error::Error>> {
         let addr_str = format!("{}:{}", address, port);
-        println!("Connecting to peer: {}", addr_str);
+        println!("[CLIENT] Connecting to peer: {}", addr_str);
         
         // Connect TCP
+        println!("[CLIENT] Establishing TCP connection...");
         let stream = TcpStream::connect(&addr_str).await?;
+        println!("[CLIENT] ✓ TCP connected to {}", addr_str);
         
         // Attempt TLS handshake with custom cert verifier
         let domain = if let Ok(ip) = address.parse::<std::net::IpAddr>() {
@@ -47,23 +49,26 @@ impl PeerClient {
                 .map_err(|e| format!("Invalid server name: {:?}", e))?
         };
         
+        println!("[CLIENT] Starting TLS handshake...");
         match self.connector.connect(domain, stream).await {
             Ok(mut tls_stream) => {
-                println!("✓ Connected to peer: {}", addr_str);
+                println!("[CLIENT] ✓ TLS handshake successful with {}", addr_str);
                 
                 // Send a test message
                 let message = "GET / HTTP/1.1\r\nHost: peer\r\n\r\n";
+                println!("[CLIENT] Sending HTTP request...");
                 tls_stream.write_all(message.as_bytes()).await?;
                 
                 // Read response
                 let mut buf = [0u8; 1024];
                 let n = tls_stream.read(&mut buf).await?;
-                println!("Received from peer:\n{}", String::from_utf8_lossy(&buf[..n]));
+                let response_preview = String::from_utf8_lossy(&buf[..n.min(80)]);
+                println!("[CLIENT] ✓ Received response ({} bytes): {}...", n, response_preview.lines().next().unwrap_or(""));
                 
                 Ok(())
             }
             Err(e) => {
-                println!("✗ TLS handshake failed: {:?}", e);
+                println!("[CLIENT] ✗ TLS handshake failed with {}: {:?}", addr_str, e);
                 Err(e.into())
             }
         }

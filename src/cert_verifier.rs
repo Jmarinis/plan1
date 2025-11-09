@@ -39,24 +39,33 @@ impl ServerCertVerifier for TofuServerCertVerifier {
         if let Some(peer_info) = trusted_peers.get_peer_info(&self.peer_address) {
             // Known peer - verify fingerprint matches
             if peer_info.fingerprint == fingerprint {
-                println!("✓ Verified known peer: {}", self.peer_address);
+                println!("[CERT] ✓ Verified known peer: {}", self.peer_address);
+                println!("[CERT]   Fingerprint matches: {}...", &fingerprint[..16]);
                 // Update last seen
                 let _ = trusted_peers.add_peer(self.peer_address.clone(), fingerprint);
                 Ok(ServerCertVerified::assertion())
             } else {
-                println!("⚠ WARNING: Certificate changed for peer {}!", self.peer_address);
-                println!("  Expected: {}", peer_info.fingerprint);
-                println!("  Received: {}", fingerprint);
+                println!("[CERT] ✗ WARNING: Certificate changed for peer {}!", self.peer_address);
+                println!("[CERT]   Expected: {}...", &peer_info.fingerprint[..16]);
+                println!("[CERT]   Received: {}...", &fingerprint[..16]);
+                println!("[CERT]   This could indicate a security issue!");
                 Err(TlsError::General("Certificate fingerprint mismatch".to_string()))
             }
         } else {
             // New peer - TOFU: trust on first use
-            println!("⚠ New peer: {} (fingerprint: {}...)", self.peer_address, &fingerprint[..16]);
-            println!("  Auto-trusting (TOFU)");
+            println!("[CERT] New peer detected: {}", self.peer_address);
+            println!("[CERT]   Fingerprint: {}...", &fingerprint[..16]);
+            println!("[CERT]   Auto-trusting (TOFU)");
             
-            match trusted_peers.add_peer(self.peer_address.clone(), fingerprint) {
-                Ok(_) => Ok(ServerCertVerified::assertion()),
-                Err(e) => Err(TlsError::General(format!("Failed to trust peer: {}", e))),
+            match trusted_peers.add_peer(self.peer_address.clone(), fingerprint.clone()) {
+                Ok(_) => {
+                    println!("[CERT] ✓ Peer {} added to trusted list", self.peer_address);
+                    Ok(ServerCertVerified::assertion())
+                },
+                Err(e) => {
+                    println!("[CERT] ✗ Failed to trust peer: {}", e);
+                    Err(TlsError::General(format!("Failed to trust peer: {}", e)))
+                },
             }
         }
     }
