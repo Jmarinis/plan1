@@ -1,5 +1,7 @@
 use std::{fs, sync::Arc};
+use std::collections::HashSet;
 use tokio::net::TcpListener;
+use tokio::sync::RwLock;
 use rustls::{ServerConfig, Certificate, PrivateKey};
 use tokio_rustls::TlsAcceptor;
 use tokio::io::{AsyncReadExt, AsyncWriteExt}; // Import the async traits
@@ -17,6 +19,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Display our certificate fingerprint
     let fingerprint = cert_manager::get_cert_fingerprint()?;
     println!("Our fingerprint: {}", fingerprint);
+    
+    // Create shared state for tracking verified peers
+    let verified_peers: Arc<RwLock<HashSet<String>>> = Arc::new(RwLock::new(HashSet::new()));
     
     // Load TLS certificate and private key
     let certs = load_certs(cert_manager::get_cert_path())?;
@@ -40,6 +45,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("HTTPS server listening on port 39001 (all subsequent requests)");
 
     // Spawn HTTP listener task
+    let verified_peers_http = verified_peers.clone();
     let _http_task = tokio::spawn(async move {
         loop {
             match http_listener.accept().await {
@@ -47,8 +53,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let client_ip = addr.ip();
                     println!("\n[HTTP] New connection from {} (port: {})", client_ip, addr.port());
                     
+                    let verified_peers_clone = verified_peers_http.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = handle_http_initial(stream, addr).await {
+                        if let Err(e) = handle_http_initial(stream, addr, verified_peers_clone).await {
                             println!("[ERROR] HTTP request handling failed: {:?}", e);
                         }
                     });
@@ -126,7 +133,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-async fn handle_http_initial(mut stream: tokio::net::TcpStream, addr: std::net::SocketAddr) -> Result<(), Box<dyn std::error::Error>> {
+async fn handle_http_initial(
+    mut stream: tokio::net::TcpStream,
+    addr: std::net::SocketAddr,
+    verified_peers: Arc<RwLock<HashSet<String>>>,
+) -> Result<(), Box<dyn std::error::Error>> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     
     let client_ip = addr.ip();
@@ -152,18 +163,40 @@ async fn handle_http_initial(mut stream: tokio::net::TcpStream, addr: std::net::
     // Extract peer port from X-Peer-Port header (default 39001)
     let peer_port = extract_peer_port(&request).unwrap_or(39001);
     
-    // Initiate reverse connection to verify peer's certificate
-    println!("[PEER] Initiating reverse connection to {}:{}", client_ip, peer_port);
-    let peer_verified = match peer_client::connect_to_peer(&client_ip.to_string(), peer_port, true).await {
-        Ok(_) => {
-            println!("[PEER] ✓ Mutual trust established with {}:{}", client_ip, peer_port);
-            true
+    // Create peer key for tracking
+    let peer_key = format!("{}:{}", client_ip, peer_port);
+    
+    // Check if peer is already verified
+    let already_verified = {
+        let peers = verified_peers.read().await;
+        peers.contains(&peer_key)
+    };
+    
+    let peer_verified = if already_verified {
+        println!("[PEER] Peer {} already verified, skipping certificate exchange", peer_key);
+        true
+    } else {
+        // Initiate reverse connection to verify peer's certificate
+        println!("[PEER] Initiating reverse connection to {}", peer_key);
+        let connection_succeeded = match peer_client::connect_to_peer(&client_ip.to_string(), peer_port, true).await {
+            Ok(_) => {
+                println!("[PEER] ✓ Mutual trust established with {}", peer_key);
+                true
+            }
+            Err(e) => {
+                println!("[PEER] ⚠ Reverse connection failed: {}", e.to_string());
+                println!("[PEER] Note: This is normal if {} is not running a peer server", client_ip);
+                false
+            }
+        };
+        
+        // Add to verified peers if successful
+        if connection_succeeded {
+            let mut peers = verified_peers.write().await;
+            peers.insert(peer_key.clone());
         }
-        Err(e) => {
-            println!("[PEER] ⚠ Reverse connection failed: {}", e);
-            println!("[PEER] Note: This is normal if {} is not running a peer server", client_ip);
-            false
-        }
+        
+        connection_succeeded
     };
     
     // Get our certificate fingerprint
