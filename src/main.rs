@@ -13,6 +13,15 @@ pub mod peer_trust;
 pub mod peer_client;
 pub mod cert_verifier;
 
+// Macro for timestamped logging
+macro_rules! log {
+    ($($arg:tt)*) => {{
+        let now = time::OffsetDateTime::now_utc();
+        let timestamp = now.format(&time::format_description::well_known::Rfc3339).unwrap_or_else(|_| String::from("[TIME_ERROR]"));
+        println!("[{}] {}", timestamp, format!($($arg)*));
+    }};
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct ConnectionInfo {
     peer: String,
@@ -28,7 +37,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // Display our certificate fingerprint
     let fingerprint = cert_manager::get_cert_fingerprint()?;
-    println!("Our fingerprint: {}", fingerprint);
+    log!("Our fingerprint: {}", fingerprint);
     
     // Create shared state for tracking verified peers
     let verified_peers: Arc<RwLock<HashSet<String>>> = Arc::new(RwLock::new(HashSet::new()));
@@ -51,12 +60,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Bind HTTP listener on port 39000 (for initial requests)
     let http_listener = TcpListener::bind("0.0.0.0:39000").await?;
-    println!("HTTP server listening on port 39000 (initial requests only)");
+    log!("HTTP server listening on port 39000 (initial requests only)");
     
     // Bind HTTPS listener on port 39001 (for secure communication)
     let https_listener = TcpListener::bind("0.0.0.0:39001").await?;
-    println!("HTTPS server listening on port 39001 (all subsequent requests)");
-    println!("\nPress Ctrl-C to shutdown gracefully\n");
+    log!("HTTPS server listening on port 39001 (all subsequent requests)");
+    log!("Press Ctrl-C to shutdown gracefully");
 
     // Setup Ctrl-C handler
     let shutdown = Arc::new(tokio::sync::Notify::new());
@@ -64,7 +73,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     tokio::spawn(async move {
         tokio::signal::ctrl_c().await.expect("Failed to listen for Ctrl-C");
-        println!("\n\n[SHUTDOWN] Received Ctrl-C, shutting down gracefully...");
+        log!("[SHUTDOWN] Received Ctrl-C, shutting down gracefully...");
         shutdown_clone.notify_waiters();
     });
 
@@ -78,20 +87,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     match result {
                         Ok((stream, addr)) => {
                             let client_ip = addr.ip();
-                            println!("\n[HTTP] New connection from {} (port: {})", client_ip, addr.port());
+                            log!("[HTTP] New connection from {} (port: {})", client_ip, addr.port());
                             
                             let verified_peers_clone = verified_peers_http.clone();
                             tokio::spawn(async move {
                                 if let Err(e) = handle_http_initial(stream, addr, verified_peers_clone).await {
-                                    println!("[ERROR] HTTP request handling failed: {:?}", e);
+                                    log!("[ERROR] HTTP request handling failed: {:?}", e);
                                 }
                             });
                         }
-                        Err(e) => println!("[ERROR] HTTP listener error: {:?}", e),
+                        Err(e) => log!("[ERROR] HTTP listener error: {:?}", e),
                     }
                 }
                 _ = shutdown_http.notified() => {
-                    println!("[SHUTDOWN] HTTP listener shutting down");
+                    log!("[SHUTDOWN] HTTP listener shutting down");
                     break;
                 }
             }
@@ -104,19 +113,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             result = https_listener.accept() => {
                 let (stream, addr) = result?;
         let client_ip = addr.ip();
-        println!("\n[HTTPS] New connection from {} (port: {})", client_ip, addr.port());
+        log!("[HTTPS] New connection from {} (port: {})", client_ip, addr.port());
 
         // Upgrade the TCP connection to TLS
         let acceptor = acceptor.clone();
         let connections_clone = connections.clone();
         let verified_peers_https = verified_peers.clone();
         tokio::spawn(async move {
-            println!("[TLS] Starting TLS handshake with {}", client_ip);
+            log!("[TLS] Starting TLS handshake with {}", client_ip);
 
             let tls_stream = acceptor.accept(stream).await;
             match tls_stream {
                 Ok(mut stream) => {
-                    println!("[TLS] ✓ Handshake successful with {}", client_ip);
+                    log!("[TLS] ✓ Handshake successful with {}", client_ip);
                     
                     // Read the request first to check for custom port header
                     let mut buf = [0u8; 1024];
@@ -125,7 +134,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             // Parse the HTTP request
                             let request = String::from_utf8_lossy(&buf[..n]);
                             let first_line = request.lines().next().unwrap_or("<empty>");
-                            println!("[HTTP] Request from {}: {}", client_ip, first_line);
+                            log!("[HTTP] Request from {}: {}", client_ip, first_line);
                             
                             // Extract the path
                             let path = extract_path(&request).unwrap_or_else(|| "/".to_string());
@@ -134,10 +143,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if path == "/monitor" {
                                 if is_localhost(&client_ip) {
                                     if let Err(e) = handle_monitor_request(&mut stream, &connections_clone).await {
-                                        println!("[ERROR] Monitor request failed: {:?}", e);
+                                        log!("[ERROR] Monitor request failed: {:?}", e);
                                     }
                                 } else {
-                                    println!("[MONITOR] Rejected non-localhost request from {}", client_ip);
+                                    log!("[MONITOR] Rejected non-localhost request from {}", client_ip);
                                     let response = "HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\nContent-Length: 36\r\n\r\nMonitor endpoint only for localhost";
                                     let _ = stream.write_all(response.as_bytes()).await;
                                 }
@@ -155,7 +164,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             };
                             
                             let peer_verified = if already_verified {
-                                println!("[PEER] Peer {} already verified, skipping certificate exchange", peer_key);
+                                log!("[PEER] Peer {} already verified, skipping certificate exchange", peer_key);
                                 true
                             } else {
                                 // Add to verified peers BEFORE initiating connection to prevent infinite loop
@@ -165,15 +174,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                                 
                                 // Initiate reverse connection to verify peer's certificate
-                                println!("[PEER] Initiating reverse connection to {}", peer_key);
+                                log!("[PEER] Initiating reverse connection to {}", peer_key);
                                 let connection_succeeded = match peer_client::connect_to_peer(&client_ip.to_string(), peer_port, true).await {
                                     Ok(_) => {
-                                        println!("[PEER] ✓ Mutual trust established with {}", peer_key);
+                                        log!("[PEER] ✓ Mutual trust established with {}", peer_key);
                                         true
                                     }
                                     Err(e) => {
-                                        println!("[PEER] ⚠ Reverse connection failed: {}", e.to_string());
-                                        println!("[PEER] Note: This is normal if {} is not running a peer server", client_ip);
+                                        log!("[PEER] ⚠ Reverse connection failed: {}", e.to_string());
+                                        log!("[PEER] Note: This is normal if {} is not running a peer server", client_ip);
                                         false
                                     }
                                 };
@@ -209,35 +218,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             // Build response with the path
                             let body = format!("Hello, World! Path: {}", path);
                             let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}", body.len(), body);
-                            println!("[HTTP] Sending 200 OK response for path: {}", path);
+                            log!("[HTTP] Sending 200 OK response for path: {}", path);
                             if let Err(e) = stream.write_all(response.as_bytes()).await {
-                                println!("[ERROR] Failed to write response: {:?}", e);
+                                log!("[ERROR] Failed to write response: {:?}", e);
                             } else {
-                                println!("[HTTP] ✓ Response sent successfully to {}", client_ip);
+                                log!("[HTTP] ✓ Response sent successfully to {}", client_ip);
                             }
                         }
-                        Ok(_) => println!("[CONN] Connection closed by {}", client_ip),
-                        Err(e) => println!("[ERROR] Read error from {}: {:?}", client_ip, e),
+                        Ok(_) => log!("[CONN] Connection closed by {}", client_ip),
+                        Err(e) => log!("[ERROR] Read error from {}: {:?}", client_ip, e),
                     }
                 }
                 Err(e) => {
-                    println!("[TLS] ✗ Handshake failed with {}: {:?}", client_ip, e);
-                    println!("[TLS] Common causes:");
-                    println!("[TLS]   - Browser rejecting self-signed certificate (accept security warning)");
-                    println!("[TLS]   - Client doesn't have TOFU verifier (use Rust peer client)");
-                    println!("[TLS]   - Certificate mismatch");
+                    log!("[TLS] ✗ Handshake failed with {}: {:?}", client_ip, e);
+                    log!("[TLS] Common causes:");
+                    log!("[TLS]   - Browser rejecting self-signed certificate (accept security warning)");
+                    log!("[TLS]   - Client doesn't have TOFU verifier (use Rust peer client)");
+                    log!("[TLS]   - Certificate mismatch");
                 },
             }
         });
             }
             _ = shutdown.notified() => {
-                println!("[SHUTDOWN] HTTPS listener shutting down");
+                log!("[SHUTDOWN] HTTPS listener shutting down");
                 break;
             }
         }
     }
     
-    println!("[SHUTDOWN] Server stopped. Goodbye!");
+    log!("[SHUTDOWN] Server stopped. Goodbye!");
     Ok(())
 }
 
@@ -259,7 +268,7 @@ async fn handle_http_initial(
     
     let request = String::from_utf8_lossy(&buf[..n]);
     let first_line = request.lines().next().unwrap_or("<empty>");
-    println!("[HTTP] Request from {}: {}", client_ip, first_line);
+    log!("[HTTP] Request from {}: {}", client_ip, first_line);
     
     let path = extract_path(&request).unwrap_or_else(|| "/".to_string());
     
@@ -281,7 +290,7 @@ async fn handle_http_initial(
     };
     
     let peer_verified = if already_verified {
-        println!("[PEER] Peer {} already verified, skipping certificate exchange", peer_key);
+        log!("[PEER] Peer {} already verified, skipping certificate exchange", peer_key);
         true
     } else {
         // Add to verified peers BEFORE initiating connection to prevent infinite loop
@@ -291,15 +300,15 @@ async fn handle_http_initial(
         }
         
         // Initiate reverse connection to verify peer's certificate
-        println!("[PEER] Initiating reverse connection to {}", peer_key);
+        log!("[PEER] Initiating reverse connection to {}", peer_key);
         let connection_succeeded = match peer_client::connect_to_peer(&client_ip.to_string(), peer_port, true).await {
             Ok(_) => {
-                println!("[PEER] ✓ Mutual trust established with {}", peer_key);
+                log!("[PEER] ✓ Mutual trust established with {}", peer_key);
                 true
             }
             Err(e) => {
-                println!("[PEER] ⚠ Reverse connection failed: {}", e.to_string());
-                println!("[PEER] Note: This is normal if {} is not running a peer server", client_ip);
+                log!("[PEER] ⚠ Reverse connection failed: {}", e.to_string());
+                log!("[PEER] Note: This is normal if {} is not running a peer server", client_ip);
                 false
             }
         };
@@ -351,7 +360,7 @@ async fn handle_http_initial(
     stream.write_all(response.as_bytes()).await?;
     stream.flush().await?;
     
-    println!("[HTTP] ✓ Initial request served, client should upgrade to HTTPS: {}", https_url);
+    log!("[HTTP] ✓ Initial request served, client should upgrade to HTTPS: {}", https_url);
     Ok(())
 }
 
@@ -405,7 +414,7 @@ async fn handle_monitor_request(
 ) -> Result<(), Box<dyn std::error::Error>> {
     use tokio::io::AsyncWriteExt;
     
-    println!("[MONITOR] Serving monitor request");
+    log!("[MONITOR] Serving monitor request");
     
     // Get connection data
     let conns = connections.read().await;
@@ -432,7 +441,7 @@ async fn handle_monitor_request(
     stream.write_all(response.as_bytes()).await?;
     stream.flush().await?;
     
-    println!("[MONITOR] ✓ Monitor data sent");
+    log!("[MONITOR] ✓ Monitor data sent");
     Ok(())
 }
 
