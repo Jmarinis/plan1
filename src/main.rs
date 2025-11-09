@@ -24,8 +24,12 @@ macro_rules! log {
 
 #[derive(Debug, Clone, Serialize)]
 struct ConnectionInfo {
-    peer: String,
+    hostname: String,
+    ip_address: String,
+    status: String,
     connected_at: String,
+    last_message: String,
+    last_message_time: String,
     request_count: usize,
     verified: bool,
 }
@@ -58,9 +62,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     let acceptor = TlsAcceptor::from(Arc::new(config));
 
-    // Bind HTTP listener on port 39000 (for initial requests)
+    // Bind HTTP listener on port 39000 (for monitor dashboard)
     let http_listener = TcpListener::bind("0.0.0.0:39000").await?;
-    log!("HTTP server listening on port 39000 (initial requests only)");
+    log!("HTTP monitor dashboard listening on port 39000");
     
     // Bind HTTPS listener on port 39001 (for secure communication)
     let https_listener = TcpListener::bind("0.0.0.0:39001").await?;
@@ -77,8 +81,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         shutdown_clone.notify_waiters();
     });
 
-    // Spawn HTTP listener task
-    let verified_peers_http = verified_peers.clone();
+    // Spawn HTTP listener task for monitor dashboard
+    let connections_http = connections.clone();
     let shutdown_http = shutdown.clone();
     let _http_task = tokio::spawn(async move {
         loop {
@@ -87,12 +91,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     match result {
                         Ok((stream, addr)) => {
                             let client_ip = addr.ip();
-                            log!("[HTTP] New connection from {} (port: {})", client_ip, addr.port());
+                            log!("[HTTP] Monitor request from {} (port: {})", client_ip, addr.port());
                             
-                            let verified_peers_clone = verified_peers_http.clone();
+                            let connections_clone = connections_http.clone();
                             tokio::spawn(async move {
-                                if let Err(e) = handle_http_initial(stream, addr, verified_peers_clone).await {
-                                    log!("[ERROR] HTTP request handling failed: {:?}", e);
+                                if let Err(e) = handle_http_monitor_dashboard(stream, &connections_clone).await {
+                                    log!("[ERROR] Monitor dashboard request failed: {:?}", e);
                                 }
                             });
                         }
@@ -100,7 +104,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 _ = shutdown_http.notified() => {
-                    log!("[SHUTDOWN] HTTP listener shutting down");
+                    log!("[SHUTDOWN] HTTP monitor listener shutting down");
                     break;
                 }
             }
@@ -198,17 +202,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             
                             // Track connection
                             {
+                                let now_utc = time::OffsetDateTime::now_utc();
+                                let timestamp = now_utc.format(&time::format_description::well_known::Rfc3339)
+                                    .unwrap_or_else(|_| String::from("unknown"));
+                                
                                 let mut conns = connections_clone.write().await;
                                 conns.entry(peer_key.clone())
-                                    .and_modify(|info| info.request_count += 1)
+                                    .and_modify(|info| {
+                                        info.request_count += 1;
+                                        info.last_message = first_line.to_string();
+                                        info.last_message_time = timestamp.clone();
+                                        info.status = if peer_verified { "Connected".to_string() } else { "Unverified".to_string() };
+                                    })
                                     .or_insert_with(|| {
-                                        let now = std::time::SystemTime::now()
-                                            .duration_since(std::time::UNIX_EPOCH)
-                                            .unwrap()
-                                            .as_secs();
                                         ConnectionInfo {
-                                            peer: peer_key.clone(),
-                                            connected_at: now.to_string(),
+                                            hostname: format!("peer-{}", client_ip),
+                                            ip_address: client_ip.to_string(),
+                                            status: if peer_verified { "Connected".to_string() } else { "Unverified".to_string() },
+                                            connected_at: timestamp.clone(),
+                                            last_message: first_line.to_string(),
+                                            last_message_time: timestamp,
                                             request_count: 1,
                                             verified: peer_verified,
                                         }
@@ -250,130 +263,164 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn handle_http_initial(
+async fn handle_http_monitor_dashboard(
     mut stream: tokio::net::TcpStream,
-    addr: std::net::SocketAddr,
-    verified_peers: Arc<RwLock<HashSet<String>>>,
+    connections: &Arc<RwLock<HashMap<String, ConnectionInfo>>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::io::AsyncWriteExt;
     
-    let client_ip = addr.ip();
+    log!("[MONITOR] Serving HTML dashboard");
     
-    // Read the HTTP request
-    let mut buf = [0u8; 1024];
-    let n = stream.read(&mut buf).await?;
-    if n == 0 {
-        return Ok(());
-    }
+    // Get connection data
+    let conns = connections.read().await;
+    let mut conn_list: Vec<ConnectionInfo> = conns.values().cloned().collect();
+    conn_list.sort_by(|a, b| b.last_message_time.cmp(&a.last_message_time));
     
-    let request = String::from_utf8_lossy(&buf[..n]);
-    let first_line = request.lines().next().unwrap_or("<empty>");
-    log!("[HTTP] Request from {}: {}", client_ip, first_line);
-    
-    let path = extract_path(&request).unwrap_or_else(|| "/".to_string());
-    
-    // Get the host from the request or use the server's IP
-    let host = extract_host(&request).unwrap_or_else(|| {
-        addr.ip().to_string()
-    });
-    
-    // Extract peer port from X-Peer-Port header (default 39001)
-    let peer_port = extract_peer_port(&request).unwrap_or(39001);
-    
-    // Create peer key for tracking
-    let peer_key = format!("{}:{}", client_ip, peer_port);
-    
-    // Check if peer is already verified
-    let already_verified = {
-        let peers = verified_peers.read().await;
-        peers.contains(&peer_key)
-    };
-    
-    let peer_verified = if already_verified {
-        log!("[PEER] Peer {} already verified, skipping certificate exchange", peer_key);
-        true
-    } else {
-        // Add to verified peers BEFORE initiating connection to prevent infinite loop
-        {
-            let mut peers = verified_peers.write().await;
-            peers.insert(peer_key.clone());
-        }
-        
-        // Initiate reverse connection to verify peer's certificate
-        log!("[PEER] Initiating reverse connection to {}", peer_key);
-        let connection_succeeded = match peer_client::connect_to_peer(&client_ip.to_string(), peer_port, true).await {
-            Ok(_) => {
-                log!("[PEER] ✓ Mutual trust established with {}", peer_key);
-                true
-            }
-            Err(e) => {
-                log!("[PEER] ⚠ Reverse connection failed: {}", e.to_string());
-                log!("[PEER] Note: This is normal if {} is not running a peer server", client_ip);
-                false
-            }
+    // Build HTML table rows
+    let table_rows: String = conn_list.iter().map(|conn| {
+        let status_class = match conn.status.as_str() {
+            "Connected" => "status-connected",
+            "Unverified" => "status-unverified",
+            _ => "status-disconnected",
         };
-        
-        // Remove from verified peers if connection failed
-        if !connection_succeeded {
-            let mut peers = verified_peers.write().await;
-            peers.remove(&peer_key);
-        }
-        
-        connection_succeeded
-    };
+        format!(
+            "<tr>
+                <td>{}</td>
+                <td>{}</td>
+                <td><span class=\"{}\">{}</span></td>
+                <td title=\"{}\">{}</td>
+                <td title=\"{}\">{}</td>
+                <td title=\"{}\">{}</td>
+                <td>{}</td>
+            </tr>",
+            conn.hostname,
+            conn.ip_address,
+            status_class,
+            conn.status,
+            conn.connected_at,
+            &conn.connected_at[11..19], // Show just time HH:MM:SS
+            conn.last_message,
+            truncate(&conn.last_message, 50),
+            conn.last_message_time,
+            &conn.last_message_time[11..19], // Show just time HH:MM:SS
+            conn.request_count,
+        )
+    }).collect::<Vec<_>>().join("\n");
     
-    // Get our certificate fingerprint
-    let fingerprint = cert_manager::get_cert_fingerprint()?;
+    let html = format!(r#"<!DOCTYPE html>
+<html>
+<head>
+    <title>Peer Monitor Dashboard</title>
+    <meta http-equiv="refresh" content="5">
+    <style>
+        body {{
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 20px;
+            background-color: #f5f5f5;
+        }}
+        h1 {{
+            color: #333;
+            border-bottom: 3px solid #4CAF50;
+            padding-bottom: 10px;
+        }}
+        .info {{
+            background-color: #e7f3fe;
+            border-left: 6px solid #2196F3;
+            padding: 10px;
+            margin-bottom: 20px;
+        }}
+        table {{
+            width: 100%;
+            border-collapse: collapse;
+            background-color: white;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }}
+        th {{
+            background-color: #4CAF50;
+            color: white;
+            padding: 12px;
+            text-align: left;
+            position: sticky;
+            top: 0;
+        }}
+        td {{
+            padding: 10px;
+            border-bottom: 1px solid #ddd;
+        }}
+        tr:hover {{
+            background-color: #f5f5f5;
+        }}
+        .status-connected {{
+            color: #4CAF50;
+            font-weight: bold;
+        }}
+        .status-unverified {{
+            color: #ff9800;
+            font-weight: bold;
+        }}
+        .status-disconnected {{
+            color: #f44336;
+            font-weight: bold;
+        }}
+        .timestamp {{
+            color: #666;
+            font-size: 0.9em;
+        }}
+    </style>
+</head>
+<body>
+    <h1>🌐 Peer Monitor Dashboard</h1>
+    <div class="info">
+        <strong>Total Connections:</strong> {}<br>
+        <strong>Last Updated:</strong> {} UTC<br>
+        <em>Auto-refreshing every 5 seconds</em>
+    </div>
+    <table>
+        <thead>
+            <tr>
+                <th>Hostname</th>
+                <th>IP Address</th>
+                <th>Status</th>
+                <th>Connected At</th>
+                <th>Last Message</th>
+                <th>Last Message Time</th>
+                <th>Requests</th>
+            </tr>
+        </thead>
+        <tbody>
+            {}
+        </tbody>
+    </table>
+</body>
+</html>"#,
+        conn_list.len(),
+        time::OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339).unwrap_or_else(|_| String::from("unknown")),
+        table_rows
+    );
     
-    // Build HTTPS URL for future requests
-    let https_url = format!("https://{}:39001", host);
-    
-    // Build JSON response with initial data and HTTPS upgrade information
-    let body = serde_json::json!({
-        "message": "Initial connection successful",
-        "path": path,
-        "https_endpoint": https_url,
-        "server_fingerprint": fingerprint,
-        "peer_verified": peer_verified,
-        "note": "Future requests should use HTTPS"
-    });
-    let body_str = body.to_string();
-    
-    // Send 200 OK with upgrade information
     let response = format!(
         "HTTP/1.1 200 OK\r\n\
-         Content-Type: application/json\r\n\
+         Content-Type: text/html\r\n\
          Content-Length: {}\r\n\
-         X-HTTPS-Endpoint: {}\r\n\
-         X-Server-Fingerprint: {}\r\n\
-         X-Peer-Verified: {}\r\n\
-         Connection: close\r\n\
          \r\n\
          {}",
-        body_str.len(),
-        https_url,
-        fingerprint,
-        peer_verified,
-        body_str
+        html.len(),
+        html
     );
     
     stream.write_all(response.as_bytes()).await?;
     stream.flush().await?;
     
-    log!("[HTTP] ✓ Initial request served, client should upgrade to HTTPS: {}", https_url);
+    log!("[MONITOR] ✓ Dashboard served");
     Ok(())
 }
 
-fn extract_host(request: &str) -> Option<String> {
-    // Look for Host: header in the HTTP request
-    for line in request.lines() {
-        if line.to_lowercase().starts_with("host:") {
-            let host = line[5..].trim();
-            // Remove port if present and return just hostname/IP
-            return Some(host.split(':').next()?.to_string());
-        }
+fn truncate(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        s.to_string()
+    } else {
+        format!("{}...", &s[..max_len])
     }
-    None
 }
 
 fn extract_peer_port(request: &str) -> Option<u16> {
