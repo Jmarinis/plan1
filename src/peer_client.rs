@@ -1,31 +1,32 @@
-use rustls::{ClientConfig, RootCertStore, Certificate};
+use rustls::ClientConfig;
 use tokio_rustls::TlsConnector;
 use tokio::net::TcpStream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use std::sync::Arc;
 use crate::peer_trust;
+use crate::cert_verifier::TofuServerCertVerifier;
 
 pub struct PeerClient {
     connector: TlsConnector,
-    auto_trust: bool,
+    _auto_trust: bool,
 }
 
 impl PeerClient {
-    pub fn new(auto_trust: bool) -> Result<Self, Box<dyn std::error::Error>> {
-        // Create a custom client config that accepts self-signed certificates
-        let mut root_store = RootCertStore::empty();
+    pub fn new_for_address(peer_address: String, _auto_trust: bool) -> Result<Self, Box<dyn std::error::Error>> {
+        // Create a custom verifier that implements TOFU
+        let verifier = TofuServerCertVerifier::new(peer_address);
         
-        // We'll use a custom verifier that implements TOFU
+        // Build client config with custom verifier
         let config = ClientConfig::builder()
             .with_safe_defaults()
-            .with_root_certificates(root_store)
+            .with_custom_certificate_verifier(verifier)
             .with_no_client_auth();
         
         let connector = TlsConnector::from(Arc::new(config));
         
         Ok(PeerClient {
             connector,
-            auto_trust,
+            _auto_trust,
         })
     }
     
@@ -66,7 +67,8 @@ impl PeerClient {
 
 // Helper function to connect to a peer with simple API
 pub async fn connect_to_peer(address: &str, port: u16, auto_trust: bool) -> Result<(), Box<dyn std::error::Error>> {
-    let client = PeerClient::new(auto_trust)?;
+    let peer_address = format!("{}:{}", address, port);
+    let client = PeerClient::new_for_address(peer_address, auto_trust)?;
     client.connect(address, port).await
 }
 

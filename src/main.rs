@@ -4,9 +4,10 @@ use rustls::{ServerConfig, Certificate, PrivateKey};
 use tokio_rustls::TlsAcceptor;
 use tokio::io::{AsyncReadExt, AsyncWriteExt}; // Import the async traits
 
-mod cert_manager;
-mod peer_trust;
-mod peer_client;
+pub mod cert_manager;
+pub mod peer_trust;
+pub mod peer_client;
+pub mod cert_verifier;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -37,6 +38,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     loop {
         // Accept new TCP connections
         let (stream, addr) = listener.accept().await?;
+        let client_ip = addr.ip();
         println!("New connection from {:?}", addr);
 
         // Upgrade the TCP connection to TLS
@@ -45,7 +47,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let tls_stream = acceptor.accept(stream).await;
             match tls_stream {
                 Ok(mut stream) => {
-                    println!("TLS connection established");
+                    println!("TLS connection established from {}", client_ip);
+                    
+                    // Initiate reverse connection to verify peer's certificate
+                    println!("Initiating reverse connection to {}:39001", client_ip);
+                    match peer_client::connect_to_peer(&client_ip.to_string(), 39001, true).await {
+                        Ok(_) => println!("✓ Mutual trust established with {}", client_ip),
+                        Err(e) => println!("⚠ Reverse connection failed: {}. Continuing anyway...", e),
+                    }
 
                     // Example: Read from the stream (you can write to it as well)
                     let mut buf = [0u8; 1024];
