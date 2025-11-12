@@ -54,9 +54,14 @@ impl PeerClient {
             Ok(mut tls_stream) => {
                 println!("[CLIENT] ✓ TLS handshake successful with {}", addr_str);
                 
-                // Send a test message
-                let message = "GET / HTTP/1.1\r\nHost: peer\r\n\r\n";
-                println!("[CLIENT] Sending HTTP request...");
+                // Get our hostname
+                let hostname = gethostname::gethostname()
+                    .to_string_lossy()
+                    .to_string();
+                
+                // Send a test message with our hostname
+                let message = format!("GET / HTTP/1.1\r\nHost: peer\r\nX-Hostname: {}\r\n\r\n", hostname);
+                println!("[CLIENT] Sending HTTP request with hostname: {}...", hostname);
                 tls_stream.write_all(message.as_bytes()).await?;
                 
                 // Read response

@@ -41,8 +41,8 @@ impl ServerCertVerifier for TofuServerCertVerifier {
             if peer_info.fingerprint == fingerprint {
                 println!("[CERT] ✓ Verified known peer: {}", self.peer_address);
                 println!("[CERT]   Fingerprint matches: {}...", &fingerprint[..16]);
-                // Update last seen
-                let _ = trusted_peers.add_peer(self.peer_address.clone(), fingerprint);
+                // Update last seen (hostname not available in cert verifier)
+                let _ = trusted_peers.add_peer(self.peer_address.clone(), fingerprint, None);
                 Ok(ServerCertVerified::assertion())
             } else {
                 println!("[CERT] ✗ WARNING: Certificate changed for peer {}!", self.peer_address);
@@ -57,7 +57,7 @@ impl ServerCertVerifier for TofuServerCertVerifier {
             println!("[CERT]   Fingerprint: {}...", &fingerprint[..16]);
             println!("[CERT]   Auto-trusting (TOFU)");
             
-            match trusted_peers.add_peer(self.peer_address.clone(), fingerprint.clone()) {
+            match trusted_peers.add_peer(self.peer_address.clone(), fingerprint.clone(), None) {
                 Ok(_) => {
                     println!("[CERT] ✓ Peer {} added to trusted list", self.peer_address);
                     Ok(ServerCertVerified::assertion())

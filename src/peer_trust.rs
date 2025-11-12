@@ -9,8 +9,14 @@ const TRUSTED_PEERS_FILE: &str = "certs/trusted_peers.json";
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PeerInfo {
     pub fingerprint: String,
+    #[serde(default = "default_hostname")]
+    pub hostname: String,
     pub first_seen: String,
     pub last_seen: String,
+}
+
+fn default_hostname() -> String {
+    "unknown".to_string()
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -64,11 +70,10 @@ impl TrustedPeers {
         }
     }
 
-    pub fn add_peer(&mut self, peer_address: String, fingerprint: String) -> Result<(), Box<dyn std::error::Error>> {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_secs()
-            .to_string();
+    pub fn add_peer(&mut self, peer_address: String, fingerprint: String, hostname: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
+        let now = time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_else(|_| String::from("unknown"));
         
         if let Some(peer_info) = self.peers.get_mut(&peer_address) {
             // Update existing peer
@@ -78,13 +83,19 @@ impl TrustedPeers {
                     peer_address, peer_info.fingerprint, fingerprint
                 ).into());
             }
-            peer_info.last_seen = now;
+            peer_info.last_seen = now.clone();
+            // Update hostname if provided
+            if let Some(h) = hostname.clone() {
+                peer_info.hostname = h;
+            }
         } else {
             // Add new peer
+            let new_hostname = hostname.clone().unwrap_or_else(|| format!("peer-{}", peer_address));
             self.peers.insert(
                 peer_address.clone(),
                 PeerInfo {
                     fingerprint,
+                    hostname: new_hostname,
                     first_seen: now.clone(),
                     last_seen: now,
                 },
@@ -118,6 +129,7 @@ pub fn verify_peer_certificate(
     peer_address: &str,
     cert_der: &[u8],
     auto_trust: bool,
+    hostname: Option<String>,
 ) -> Result<bool, Box<dyn std::error::Error>> {
     use sha2::{Digest, Sha256};
     
@@ -131,8 +143,8 @@ pub fn verify_peer_certificate(
     if let Some(peer_info) = trusted_peers.get_peer_info(peer_address) {
         // Known peer - verify fingerprint matches
         if peer_info.fingerprint == fingerprint {
-            println!("✓ Verified known peer: {}", peer_address);
-            trusted_peers.add_peer(peer_address.to_string(), fingerprint)?;
+            println!("✓ Verified known peer: {} ({})", peer_address, peer_info.hostname);
+            trusted_peers.add_peer(peer_address.to_string(), fingerprint, hostname)?;
             Ok(true)
         } else {
             println!("⚠ WARNING: Certificate changed for peer {}!", peer_address);
@@ -143,18 +155,19 @@ pub fn verify_peer_certificate(
         }
     } else {
         // New peer - TOFU
-        println!("⚠ New peer connecting: {}", peer_address);
+        let display_name = hostname.as_deref().unwrap_or(peer_address);
+        println!("⚠ New peer connecting: {} ({})", peer_address, display_name);
         println!("  Fingerprint: {}", fingerprint);
         
         if auto_trust {
             println!("  Auto-trusting (TOFU enabled)");
-            trusted_peers.add_peer(peer_address.to_string(), fingerprint)?;
+            trusted_peers.add_peer(peer_address.to_string(), fingerprint, hostname)?;
             Ok(true)
         } else {
             println!("  Trust this peer? (y/n)");
             // In a real implementation, you'd want user input here
             // For now, we'll auto-trust in server mode
-            trusted_peers.add_peer(peer_address.to_string(), fingerprint)?;
+            trusted_peers.add_peer(peer_address.to_string(), fingerprint, hostname)?;
             Ok(true)
         }
     }

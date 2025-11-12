@@ -157,9 +157,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 return;
                             }
                             
-                            // Extract peer port from X-Peer-Port header (default 39001)
+                            // Extract peer port and hostname from headers
                             let peer_port = extract_peer_port(&request).unwrap_or(39001);
+                            let peer_hostname = extract_hostname(&request);
                             let peer_key = format!("{}:{}", client_ip, peer_port);
+                            
+                            // Update peer_trust with hostname if provided
+                            if let Some(ref hostname) = peer_hostname {
+                                if let Ok(mut trusted) = peer_trust::TrustedPeers::load() {
+                                    if let Some(peer_info) = trusted.get_peer_info(&peer_key) {
+                                        let fingerprint = peer_info.fingerprint.clone();
+                                        let _ = trusted.add_peer(peer_key.clone(), fingerprint, Some(hostname.clone()));
+                                        log!("[PEER] Updated hostname for {} to {}", peer_key, hostname);
+                                    }
+                                }
+                            }
                             
                             // Check if peer is already verified
                             let already_verified = {
@@ -225,10 +237,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         info.last_message = first_line.to_string();
                                         info.last_message_time = timestamp.clone();
                                         info.status = if peer_verified { "Connected".to_string() } else { "Unverified".to_string() };
+                                        // Update hostname if provided
+                                        if let Some(ref h) = peer_hostname {
+                                            info.hostname = h.clone();
+                                        }
                                     })
                                     .or_insert_with(|| {
                                         ConnectionInfo {
-                                            hostname: format!("peer-{}", client_ip),
+                                            hostname: peer_hostname.clone().unwrap_or_else(|| format!("peer-{}", client_ip)),
                                             ip_address: client_ip.to_string(),
                                             status: if peer_verified { "Connected".to_string() } else { "Unverified".to_string() },
                                             connected_at: timestamp.clone(),
@@ -374,11 +390,11 @@ async fn handle_http_monitor_dashboard(
             status_class,
             conn.status,
             conn.connected_at,
-            &conn.connected_at[11..19], // Show just time HH:MM:SS
+            format_timestamp_short(&conn.connected_at),
             conn.last_message,
             truncate(&conn.last_message, 50),
             conn.last_message_time,
-            &conn.last_message_time[11..19], // Show just time HH:MM:SS
+            format_timestamp_short(&conn.last_message_time),
             conn.request_count,
         )
     }).collect::<Vec<_>>().join("\n");
@@ -496,6 +512,17 @@ fn truncate(s: &str, max_len: usize) -> String {
         s.to_string()
     } else {
         format!("{}...", &s[..max_len])
+    }
+}
+
+fn format_timestamp_short(timestamp: &str) -> String {
+    // Format RFC3339 timestamp to show date and time
+    // Input format: "2025-11-12T02:31:05Z"
+    // Output format: "2025-11-12 02:31:05"
+    if timestamp.len() >= 19 {
+        format!("{} {}", &timestamp[0..10], &timestamp[11..19])
+    } else {
+        timestamp.to_string()
     }
 }
 
@@ -618,6 +645,19 @@ fn extract_peer_port(request: &str) -> Option<u16> {
             let port_str = line[13..].trim();
             if let Ok(port) = port_str.parse::<u16>() {
                 return Some(port);
+            }
+        }
+    }
+    None
+}
+
+fn extract_hostname(request: &str) -> Option<String> {
+    // Look for X-Hostname: header in the HTTP request
+    for line in request.lines() {
+        if line.to_lowercase().starts_with("x-hostname:") {
+            let hostname = line[11..].trim();
+            if !hostname.is_empty() {
+                return Some(hostname.to_string());
             }
         }
     }
