@@ -778,16 +778,16 @@ async fn exchange_peer_lists(
     
     // Build list of peer addresses to share (exclude the peer we're talking to)
     let current_peer = format!("{}:{}", peer_ip, peer_port);
-    let peers_to_share: Vec<String> = all_trusted_peers
+    let peers_to_share: Vec<(String, String)> = all_trusted_peers
         .iter()
-        .map(|(addr, _)| addr.clone())
-        .filter(|addr| addr != &current_peer)
+        .map(|(addr, info)| (addr.clone(), info.hostname.clone()))
+        .filter(|(addr, _)| addr != &current_peer)
         .collect();
     
     log!("[MESH] Sharing {} trusted peer addresses", peers_to_share.len());
     
     // For each shared peer address, try to connect if not already verified
-    for peer_addr in peers_to_share {
+    for (peer_addr, peer_hostname) in peers_to_share {
         // Parse IP and port
         let parts: Vec<&str> = peer_addr.split(':').collect();
         if parts.len() != 2 {
@@ -823,6 +823,7 @@ async fn exchange_peer_lists(
         let connections_clone = connections.clone();
         let peer_addr_clone = peer_addr.clone();
         let new_peer_ip_clone = new_peer_ip.clone();
+        let peer_hostname_clone = peer_hostname.clone();
         tokio::spawn(async move {
             let connection_succeeded = match peer_client::connect_to_peer(&new_peer_ip, new_peer_port, true).await {
                 Ok(_) => {
@@ -845,7 +846,7 @@ async fn exchange_peer_lists(
                 conns.entry(peer_addr_clone.clone())
                     .or_insert_with(|| {
                         ConnectionInfo {
-                            hostname: format!("peer-{}", new_peer_ip_clone),
+                            hostname: peer_hostname_clone.clone(),
                             ip_address: new_peer_ip_clone.clone(),
                             status: "Connected (Mesh)".to_string(),
                             connected_at: timestamp.clone(),
