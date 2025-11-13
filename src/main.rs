@@ -12,6 +12,7 @@ pub mod cert_manager;
 pub mod peer_trust;
 pub mod peer_client;
 pub mod cert_verifier;
+pub mod heartbeat;
 
 // Macro for timestamped logging
 macro_rules! log {
@@ -23,7 +24,7 @@ macro_rules! log {
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct ConnectionInfo {
+pub(crate) struct ConnectionInfo {
     hostname: String,
     ip_address: String,
     status: String,
@@ -32,6 +33,9 @@ struct ConnectionInfo {
     last_message_time: String,
     request_count: usize,
     verified: bool,
+    last_heartbeat_sent: Option<String>,
+    last_heartbeat_received: Option<String>,
+    alive: bool,
 }
 
 #[tokio::main]
@@ -81,6 +85,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         shutdown_clone.notify_waiters();
     });
 
+    // Start heartbeat background task
+    let connections_heartbeat = connections.clone();
+    let _heartbeat_task = heartbeat::start_heartbeat_task(connections_heartbeat);
+    log!("[HEARTBEAT] Background heartbeat task started");
+    
     // Spawn HTTP listener task for monitor dashboard
     let connections_http = connections.clone();
     let shutdown_http = shutdown.clone();
@@ -142,6 +151,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             
                             // Extract the path
                             let path = extract_path(&request).unwrap_or_else(|| "/".to_string());
+                            
+                            // Handle /heartbeat endpoint (respond to alive checks)
+                            if path == "/heartbeat" {
+                                log!("[HEARTBEAT] Received heartbeat request from {}", client_ip);
+                                let response = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 5\r\n\r\nalive";
+                                if let Err(e) = stream.write_all(response.as_bytes()).await {
+                                    log!("[ERROR] Failed to send heartbeat response: {:?}", e);
+                                }
+                                return;
+                            }
                             
                             // Handle /monitor endpoint (localhost only)
                             if path == "/monitor" {
@@ -252,6 +271,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             last_message_time: timestamp,
                                             request_count: 1,
                                             verified: peer_verified,
+                                            last_heartbeat_sent: None,
+                                            last_heartbeat_received: None,
+                                            alive: true,
                                         }
                                     });
                                 if is_new {
@@ -343,6 +365,9 @@ async fn handle_http_monitor_dashboard(
                         last_message_time: timestamp,
                         request_count: 1,
                         verified: true,
+                        last_heartbeat_sent: None,
+                        last_heartbeat_received: None,
+                        alive: true,
                     }
                 });
             log!("[INITIATE] Added connection: {} (Total: {})", peer_key, conns.len());
@@ -375,20 +400,32 @@ async fn handle_http_monitor_dashboard(
             "Unverified" => "status-unverified",
             _ => "status-disconnected",
         };
+        
+        let alive_status = if conn.alive { "✓ Alive" } else { "✗ Dead" };
+        let alive_class = if conn.alive { "status-connected" } else { "status-disconnected" };
+        
+        let last_hb = conn.last_heartbeat_received.as_ref()
+            .map(|s| format_timestamp_short(s))
+            .unwrap_or_else(|| "Never".to_string());
+        
         format!(
             "<tr>
                 <td>{}</td>
                 <td>{}</td>
                 <td><span class=\"{}\">{}</span></td>
+                <td><span class=\"{}\">{}</span></td>
                 <td title=\"{}\">{}</td>
                 <td title=\"{}\">{}</td>
                 <td title=\"{}\">{}</td>
                 <td>{}</td>
+                <td title=\"{}\">{}</td>
             </tr>",
             conn.hostname,
             conn.ip_address,
             status_class,
             conn.status,
+            alive_class,
+            alive_status,
             conn.connected_at,
             format_timestamp_short(&conn.connected_at),
             conn.last_message,
@@ -396,6 +433,8 @@ async fn handle_http_monitor_dashboard(
             conn.last_message_time,
             format_timestamp_short(&conn.last_message_time),
             conn.request_count,
+            conn.last_heartbeat_received.as_ref().unwrap_or(&"Never".to_string()),
+            last_hb,
         )
     }).collect::<Vec<_>>().join("\n");
     
@@ -434,6 +473,19 @@ async fn handle_http_monitor_dashboard(
             text-align: left;
             position: sticky;
             top: 0;
+            cursor: pointer;
+            user-select: none;
+        }}
+        th:hover {{
+            background-color: #45a049;
+        }}
+        th.sort-asc::after {{
+            content: ' \u25B2';
+            font-size: 0.8em;
+        }}
+        th.sort-desc::after {{
+            content: ' \u25BC';
+            font-size: 0.8em;
         }}
         td {{
             padding: 10px;
@@ -467,22 +519,76 @@ async fn handle_http_monitor_dashboard(
         <strong>Last Updated:</strong> {} UTC<br>
         <em>Auto-refreshing every 5 seconds</em>
     </div>
-    <table>
+    <table id="peerTable">
         <thead>
             <tr>
-                <th>Hostname</th>
-                <th>IP Address</th>
-                <th>Status</th>
-                <th>Connected At</th>
-                <th>Last Message</th>
-                <th>Last Message Time</th>
-                <th>Requests</th>
+                <th onclick="sortTable(0)">Hostname</th>
+                <th onclick="sortTable(1)">IP Address</th>
+                <th onclick="sortTable(2)">Status</th>
+                <th onclick="sortTable(3)">Alive</th>
+                <th onclick="sortTable(4)">Connected At</th>
+                <th onclick="sortTable(5)">Last Message</th>
+                <th onclick="sortTable(6)">Last Message Time</th>
+                <th onclick="sortTable(7)">Requests</th>
+                <th onclick="sortTable(8)">Last Heartbeat</th>
             </tr>
         </thead>
         <tbody>
             {}
         </tbody>
     </table>
+    <script>
+        let sortDirections = {{}};
+        
+        function sortTable(columnIndex) {{
+            const table = document.getElementById('peerTable');
+            const tbody = table.querySelector('tbody');
+            const rows = Array.from(tbody.querySelectorAll('tr'));
+            const headers = table.querySelectorAll('th');
+            
+            // Toggle sort direction
+            if (!sortDirections[columnIndex]) {{
+                sortDirections[columnIndex] = 'asc';
+            }} else if (sortDirections[columnIndex] === 'asc') {{
+                sortDirections[columnIndex] = 'desc';
+            }} else {{
+                sortDirections[columnIndex] = 'asc';
+            }}
+            
+            const direction = sortDirections[columnIndex];
+            
+            // Remove sort indicators from all headers
+            headers.forEach(h => {{
+                h.classList.remove('sort-asc', 'sort-desc');
+            }});
+            
+            // Add sort indicator to current header
+            headers[columnIndex].classList.add(direction === 'asc' ? 'sort-asc' : 'sort-desc');
+            
+            // Sort rows
+            rows.sort((a, b) => {{
+                const aValue = a.cells[columnIndex].textContent.trim();
+                const bValue = b.cells[columnIndex].textContent.trim();
+                
+                // Try to parse as numbers
+                const aNum = parseFloat(aValue);
+                const bNum = parseFloat(bValue);
+                
+                let comparison;
+                if (!isNaN(aNum) && !isNaN(bNum)) {{
+                    comparison = aNum - bNum;
+                }} else {{
+                    comparison = aValue.localeCompare(bValue);
+                }}
+                
+                return direction === 'asc' ? comparison : -comparison;
+            }});
+            
+            // Clear and re-append sorted rows
+            tbody.innerHTML = '';
+            rows.forEach(row => tbody.appendChild(row));
+        }}
+    </script>
 </body>
 </html>"#,
         conn_list.len(),
@@ -624,6 +730,9 @@ async fn exchange_peer_lists(
                             last_message_time: timestamp,
                             request_count: 0,
                             verified: true,
+                            last_heartbeat_sent: None,
+                            last_heartbeat_received: None,
+                            alive: true,
                         }
                     });
             } else {

@@ -83,6 +83,11 @@ The application implements Trust-On-First-Use (TOFU) with bidirectional trust ne
   - Accepts self-signed certificates
   - Implements TOFU logic for peer verification
 
+- **`heartbeat`**: Peer health monitoring system
+  - Sends "are you alive" checks every 60 seconds
+  - Tracks alive/dead status of verified peers
+  - Updates connection state with heartbeat timestamps
+
 - **`main.rs`**: HTTPS server implementation
   - Listens on port 39001
   - Detects HTTP vs HTTPS and auto-redirects HTTP → HTTPS
@@ -169,10 +174,13 @@ The repository includes extensive documentation:
 - **PEER_PORT_HEADER.md**: Using `X-Peer-Port` header for non-standard ports
 - **HTTP_REDIRECT.md** & **HTTP_REDIRECT_SUMMARY.md**: HTTP-to-HTTPS redirect details
 - **LOGGING_GUIDE.md**: Logging implementation details
+- **HEARTBEAT_FEATURE.md**: Heartbeat system and sortable dashboard documentation
 
 ## Project Roadmap
 
 Current status: ✅ HTTPS with Bidirectional TOFU complete
+✅ Heartbeat system with alive/dead monitoring
+✅ Sortable dashboard columns
 
 Future features (see README.md):
 - Config file reading
