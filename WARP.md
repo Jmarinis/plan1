@@ -175,12 +175,15 @@ The repository includes extensive documentation:
 - **HTTP_REDIRECT.md** & **HTTP_REDIRECT_SUMMARY.md**: HTTP-to-HTTPS redirect details
 - **LOGGING_GUIDE.md**: Logging implementation details
 - **HEARTBEAT_FEATURE.md**: Heartbeat system and sortable dashboard documentation
+- **STARTUP_RECONNECTION.md**: Automatic peer reconnection on startup and dashboard improvements
 
 ## Project Roadmap
 
 Current status: ✅ HTTPS with Bidirectional TOFU complete
 ✅ Heartbeat system with alive/dead monitoring
 ✅ Sortable dashboard columns
+✅ Startup reconnection to previously trusted peers
+✅ Persistent dashboard sort state
 
 Future features (see README.md):
 - Config file reading

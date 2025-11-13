@@ -85,6 +85,85 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         shutdown_clone.notify_waiters();
     });
 
+    // Reconnect to previously trusted peers on startup
+    log!("[STARTUP] Loading previously trusted peers...");
+    if let Ok(trusted) = peer_trust::TrustedPeers::load() {
+        let peer_list = trusted.list_peers();
+        log!("[STARTUP] Found {} previously trusted peers", peer_list.len());
+        
+        for (peer_addr, peer_info) in peer_list {
+            // Parse address to get IP and port
+            let parts: Vec<&str> = peer_addr.split(':').collect();
+            if parts.len() != 2 {
+                continue;
+            }
+            
+            let peer_ip = parts[0].to_string();
+            let peer_port = match parts[1].parse::<u16>() {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            
+            log!("[STARTUP] Attempting to reconnect to {} ({})", peer_addr, peer_info.hostname);
+            
+            let verified_peers_clone = verified_peers.clone();
+            let connections_clone = connections.clone();
+            let peer_addr_clone = peer_addr.clone();
+            let peer_hostname = peer_info.hostname.clone();
+            
+            // Spawn reconnection attempt in background
+            tokio::spawn(async move {
+                // Add to verified peers before connecting to prevent loops
+                {
+                    let mut peers = verified_peers_clone.write().await;
+                    peers.insert(peer_addr_clone.clone());
+                }
+                
+                let reconnect_success = match peer_client::connect_to_peer(&peer_ip, peer_port, true).await {
+                    Ok(_) => {
+                        log!("[STARTUP] ✓ Successfully reconnected to {} ({})", peer_addr_clone, peer_hostname);
+                        true
+                    }
+                    Err(e) => {
+                        log!("[STARTUP] ⚠ Failed to reconnect to {}: {}", peer_addr_clone, e);
+                        false
+                    }
+                };
+                
+                if reconnect_success {
+                    // Add to connections tracking
+                    let now_utc = time::OffsetDateTime::now_utc();
+                    let timestamp = now_utc.format(&time::format_description::well_known::Rfc3339)
+                        .unwrap_or_else(|_| String::from("unknown"));
+                    
+                    let mut conns = connections_clone.write().await;
+                    conns.entry(peer_addr_clone.clone())
+                        .or_insert_with(|| {
+                            ConnectionInfo {
+                                hostname: peer_hostname.clone(),
+                                ip_address: peer_ip.clone(),
+                                status: "Connected".to_string(),
+                                connected_at: timestamp.clone(),
+                                last_message: "Startup reconnection".to_string(),
+                                last_message_time: timestamp,
+                                request_count: 0,
+                                verified: true,
+                                last_heartbeat_sent: None,
+                                last_heartbeat_received: None,
+                                alive: true,
+                            }
+                        });
+                } else {
+                    // Remove from verified peers if connection failed
+                    let mut peers = verified_peers_clone.write().await;
+                    peers.remove(&peer_addr_clone);
+                }
+            });
+        }
+    } else {
+        log!("[STARTUP] No previously trusted peers found");
+    }
+    
     // Start heartbeat background task
     let connections_heartbeat = connections.clone();
     let _heartbeat_task = heartbeat::start_heartbeat_task(connections_heartbeat);
@@ -401,7 +480,7 @@ async fn handle_http_monitor_dashboard(
             _ => "status-disconnected",
         };
         
-        let alive_status = if conn.alive { "✓ Alive" } else { "✗ Dead" };
+        let alive_status = if conn.alive { "&#x2713; Alive" } else { "&#x2717; Dead" };
         let alive_class = if conn.alive { "status-connected" } else { "status-disconnected" };
         
         let last_hb = conn.last_heartbeat_received.as_ref()
@@ -480,11 +559,11 @@ async fn handle_http_monitor_dashboard(
             background-color: #45a049;
         }}
         th.sort-asc::after {{
-            content: ' \u25B2';
+            content: ' \25B2';
             font-size: 0.8em;
         }}
         th.sort-desc::after {{
-            content: ' \u25BC';
+            content: ' \25BC';
             font-size: 0.8em;
         }}
         td {{
@@ -538,7 +617,9 @@ async fn handle_http_monitor_dashboard(
         </tbody>
     </table>
     <script>
-        let sortDirections = {{}};
+        // Restore sort state from localStorage or initialize
+        let sortDirections = JSON.parse(localStorage.getItem('sortDirections')) || {{}};
+        let currentSortColumn = localStorage.getItem('currentSortColumn');
         
         function sortTable(columnIndex) {{
             const table = document.getElementById('peerTable');
@@ -556,6 +637,11 @@ async fn handle_http_monitor_dashboard(
             }}
             
             const direction = sortDirections[columnIndex];
+            currentSortColumn = columnIndex;
+            
+            // Save sort state to localStorage
+            localStorage.setItem('sortDirections', JSON.stringify(sortDirections));
+            localStorage.setItem('currentSortColumn', currentSortColumn);
             
             // Remove sort indicators from all headers
             headers.forEach(h => {{
@@ -588,6 +674,43 @@ async fn handle_http_monitor_dashboard(
             tbody.innerHTML = '';
             rows.forEach(row => tbody.appendChild(row));
         }}
+        
+        // Apply saved sort on page load
+        window.addEventListener('DOMContentLoaded', function() {{
+            if (currentSortColumn !== null && currentSortColumn !== undefined) {{
+                const columnIndex = parseInt(currentSortColumn);
+                const headers = document.querySelectorAll('#peerTable th');
+                const direction = sortDirections[columnIndex] || 'asc';
+                
+                // Restore sort indicator
+                headers[columnIndex].classList.add(direction === 'asc' ? 'sort-asc' : 'sort-desc');
+                
+                // Re-apply sort
+                const table = document.getElementById('peerTable');
+                const tbody = table.querySelector('tbody');
+                const rows = Array.from(tbody.querySelectorAll('tr'));
+                
+                rows.sort((a, b) => {{
+                    const aValue = a.cells[columnIndex].textContent.trim();
+                    const bValue = b.cells[columnIndex].textContent.trim();
+                    
+                    const aNum = parseFloat(aValue);
+                    const bNum = parseFloat(bValue);
+                    
+                    let comparison;
+                    if (!isNaN(aNum) && !isNaN(bNum)) {{
+                        comparison = aNum - bNum;
+                    }} else {{
+                        comparison = aValue.localeCompare(bValue);
+                    }}
+                    
+                    return direction === 'asc' ? comparison : -comparison;
+                }});
+                
+                tbody.innerHTML = '';
+                rows.forEach(row => tbody.appendChild(row));
+            }}
+        }});
     </script>
 </body>
 </html>"#,
