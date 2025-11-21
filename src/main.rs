@@ -466,6 +466,13 @@ async fn handle_http_monitor_dashboard(
     // Serve dashboard for root path
     log!("[MONITOR] Serving HTML dashboard");
     
+    // Get node name
+    let node_name = match gethostname::gethostname().to_str() {
+        Some(name) => name.to_string(),
+        None => "Unknown".to_string(),
+    };
+    log!("[MONITOR] Node name: {}", node_name);
+    
     // Get connection data
     let conns = connections.read().await;
     let mut conn_list: Vec<ConnectionInfo> = conns.values().cloned().collect();
@@ -594,6 +601,7 @@ async fn handle_http_monitor_dashboard(
 <body>
     <h1>Peer Monitor</h1>
     <div class="info">
+        <strong>Node Name:</strong> {}<br>
         <strong>Total Connections:</strong> {}<br>
         <strong>Last Updated:</strong> {} UTC<br>
         <em>Auto-refreshing every 5 seconds</em>
@@ -714,6 +722,7 @@ async fn handle_http_monitor_dashboard(
     </script>
 </body>
 </html>"#,
+        node_name,
         conn_list.len(),
         time::OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339).unwrap_or_else(|_| String::from("unknown")),
         table_rows
