@@ -527,8 +527,9 @@ async fn handle_http_monitor_dashboard(
     let html = format!(r#"<!DOCTYPE html>
 <html>
 <head>
-    <title>Peer Monitor Dashboard</title>
+    <title>Peer Monitor - {}</title>
     <meta http-equiv="refresh" content="5">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🔗</text></svg>">
     <style>
         body {{
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
@@ -599,7 +600,7 @@ async fn handle_http_monitor_dashboard(
     </style>
 </head>
 <body>
-    <h1>Peer Monitor</h1>
+    <h1>Peer Monitor on {}</h1>
     <div class="info">
         <strong>Node Name:</strong> {}<br>
         <strong>Total Connections:</strong> {}<br>
@@ -722,6 +723,8 @@ async fn handle_http_monitor_dashboard(
     </script>
 </body>
 </html>"#,
+        node_name,
+        node_name,
         node_name,
         conn_list.len(),
         time::OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339).unwrap_or_else(|_| String::from("unknown")),
