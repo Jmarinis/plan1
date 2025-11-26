@@ -1,0 +1,39 @@
+{
+  "peers": {
+    "192.168.1.188:39001": {
+      "fingerprint": "85d8e9c53250e0e35f6b6d8284f512db6fb07cf92d861cb9e02026220e1ba833",
+      "first_seen": "1762714852",
+      "last_seen": "1762722407"
+    },
+    "127.0.0.1:39001": {
+      "fingerprint": "85d8e9c53250e0e35f6b6d8284f512db6fb07cf92d861cb9e02026220e1ba833",
+      "first_seen": "1762722407",
+      "last_seen": "1762914468"
+    },
+    "192.168.86.32:39001": {
+      "fingerprint": "85d8e9c53250e0e35f6b6d8284f512db6fb07cf92d861cb9e02026220e1ba833",
+      "first_seen": "1762715100",
+      "last_seen": "1762722407"
+    },
+    "192.168.1.186:39001": {
+      "fingerprint": "85d8e9c53250e0e35f6b6d8284f512db6fb07cf92d861cb9e02026220e1ba833",
+      "first_seen": "1762722616",
+      "last_seen": "1762722616"
+    },
+    "192.168.1.201:39001": {
+      "fingerprint": "85d8e9c53250e0e35f6b6d8284f512db6fb07cf92d861cb9e02026220e1ba833",
+      "first_seen": "1762722578",
+      "last_seen": "1762722578"
+    },
+    "192.168.1.202:39001": {
+      "fingerprint": "85d8e9c53250e0e35f6b6d8284f512db6fb07cf92d861cb9e02026220e1ba833",
+      "first_seen": "1762722656",
+      "last_seen": "1762722656"
+    },
+    "192.168.86.62:39001": {
+      "fingerprint": "85d8e9c53250e0e35f6b6d8284f512db6fb07cf92d861cb9e02026220e1ba833",
+      "first_seen": "1762725754",
+      "last_seen": "1762725754"
+    }
+  }
+}
