@@ -478,33 +478,44 @@ async fn handle_http_monitor_dashboard(
     let mut conn_list: Vec<ConnectionInfo> = conns.values().cloned().collect();
     log!("[MONITOR] Found {} connections in HashMap", conn_list.len());
     conn_list.sort_by(|a, b| b.last_message_time.cmp(&a.last_message_time));
+
+    // Calculate statistics
+    let total_peers = conn_list.len();
+    let connected_count = conn_list.iter().filter(|c| c.status == "Connected").count();
+    let alive_count = conn_list.iter().filter(|c| c.alive).count();
+    let last_updated = time::OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339).unwrap_or_else(|_| String::from("unknown"));
     
-    // Build HTML table rows
+    // Build HTML table rows with expandable details
     let table_rows: String = conn_list.iter().map(|conn| {
         let status_class = match conn.status.as_str() {
             "Connected" => "status-connected",
             "Unverified" => "status-unverified",
             _ => "status-disconnected",
         };
-        
+
         let alive_status = if conn.alive { "&#x2713; Alive" } else { "&#x2717; Dead" };
         let alive_class = if conn.alive { "status-connected" } else { "status-disconnected" };
-        
+
         let last_hb = conn.last_heartbeat_received.as_ref()
             .map(|s| format_timestamp_short(s))
             .unwrap_or_else(|| "Never".to_string());
-        
-        format!(
+
+        let last_hb_sent = conn.last_heartbeat_sent.as_ref()
+            .map(|s| format_timestamp_short(s))
+            .unwrap_or_else(|| "Never".to_string());
+
+        // Main table row
+        let main_row = format!(
             "<tr>
                 <td>{}</td>
                 <td>{}</td>
                 <td><span class=\"{}\">{}</span></td>
                 <td><span class=\"{}\">{}</span></td>
-                <td title=\"{}\">{}</td>
-                <td title=\"{}\">{}</td>
-                <td title=\"{}\">{}</td>
                 <td>{}</td>
-                <td title=\"{}\">{}</td>
+                <td>{}</td>
+                <td>{}</td>
+                <td>{}</td>
+                <td><button class=\"expand-btn\" onclick=\"toggleDetails(this)\">&#9654;</button></td>
             </tr>",
             conn.hostname,
             conn.ip_address,
@@ -512,16 +523,49 @@ async fn handle_http_monitor_dashboard(
             conn.status,
             alive_class,
             alive_status,
-            conn.connected_at,
             format_timestamp_short(&conn.connected_at),
-            conn.last_message,
             truncate(&conn.last_message, 50),
-            conn.last_message_time,
-            format_timestamp_short(&conn.last_message_time),
             conn.request_count,
-            conn.last_heartbeat_received.as_ref().unwrap_or(&"Never".to_string()),
             last_hb,
-        )
+        );
+
+        // Details row
+        let details_row = format!(
+            "<tr class=\"details-row\">
+                <td colspan=\"9\" class=\"details-content\">
+                    <div class=\"detail-item\"><span class=\"detail-label\">Full Hostname:</span> {}</div>
+                    <div class=\"detail-item\"><span class=\"detail-label\">IP Address:</span> {}</div>
+                    <div class=\"detail-item\"><span class=\"detail-label\">Status:</span> <span class=\"{}\">{}</span></div>
+                    <div class=\"detail-item\"><span class=\"detail-label\">Verified:</span> {}</div>
+                    <div class=\"detail-item\"><span class=\"detail-label\">Alive:</span> <span class=\"{}\">{}</span></div>
+                    <div class=\"detail-item\"><span class=\"detail-label\">Connected At:</span> {} <span class=\"timestamp\">(full: {})</span></div>
+                    <div class=\"detail-item\"><span class=\"detail-label\">Last Message:</span> {}</div>
+                    <div class=\"detail-item\"><span class=\"detail-label\">Last Message Time:</span> {} <span class=\"timestamp\">(full: {})</span></div>
+                    <div class=\"detail-item\"><span class=\"detail-label\">Total Requests:</span> {}</div>
+                    <div class=\"detail-item\"><span class=\"detail-label\">Last Heartbeat Received:</span> {} <span class=\"timestamp\">(full: {})</span></div>
+                    <div class=\"detail-item\"><span class=\"detail-label\">Last Heartbeat Sent:</span> {} <span class=\"timestamp\">(full: {})</span></div>
+                </td>
+            </tr>",
+            conn.hostname,
+            conn.ip_address,
+            status_class,
+            conn.status,
+            if conn.verified { "Yes" } else { "No" },
+            alive_class,
+            if conn.alive { "Alive" } else { "Dead" },
+            format_timestamp_short(&conn.connected_at),
+            conn.connected_at,
+            conn.last_message,
+            format_timestamp_short(&conn.last_message_time),
+            conn.last_message_time,
+            conn.request_count,
+            last_hb,
+            conn.last_heartbeat_received.as_ref().unwrap_or(&"Never".to_string()),
+            last_hb_sent,
+            conn.last_heartbeat_sent.as_ref().unwrap_or(&"Never".to_string()),
+        );
+
+        format!("{}{}", main_row, details_row)
     }).collect::<Vec<_>>().join("\n");
     
     let html = format!(r#"<!DOCTYPE html>
@@ -529,29 +573,96 @@ async fn handle_http_monitor_dashboard(
 <head>
     <title>Peer Monitor - {}</title>
     <meta http-equiv="refresh" content="5">
-    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🔗</text></svg>">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>&#128279;</text></svg>">
     <style>
         body {{
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             margin: 20px;
             background-color: #f5f5f5;
+            color: #333;
+        }}
+        .header {{
+            background: linear-gradient(135deg, #4CAF50, #45a049);
+            color: white;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
         }}
         h1 {{
-            color: #333;
-            border-bottom: 3px solid #4CAF50;
-            padding-bottom: 10px;
+            margin: 0;
+            font-size: 2em;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }}
+        .controls {{
+            display: flex;
+            gap: 15px;
+            align-items: center;
+            margin-top: 15px;
+            flex-wrap: wrap;
+        }}
+        .search-box {{
+            padding: 8px 12px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+            width: 250px;
+        }}
+        .btn {{
+            padding: 8px 16px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: all 0.2s;
+        }}
+        .btn-primary {{
+            background-color: #2196F3;
+            color: white;
+        }}
+        .btn-primary:hover {{
+            background-color: #1976D2;
+        }}
+        .btn-secondary {{
+            background-color: #757575;
+            color: white;
+        }}
+        .btn-secondary:hover {{
+            background-color: #616161;
+        }}
+        .stats {{
+            display: flex;
+            gap: 20px;
+            margin-top: 10px;
+        }}
+        .stat {{
+            background: rgba(255,255,255,0.1);
+            padding: 10px;
+            border-radius: 4px;
+            text-align: center;
+        }}
+        .stat-number {{
+            font-size: 1.5em;
+            font-weight: bold;
         }}
         .info {{
             background-color: #e7f3fe;
             border-left: 6px solid #2196F3;
-            padding: 10px;
+            padding: 15px;
             margin-bottom: 20px;
+            border-radius: 0 4px 4px 0;
+        }}
+        .table-container {{
+            background-color: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            overflow: hidden;
         }}
         table {{
             width: 100%;
             border-collapse: collapse;
-            background-color: white;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
         }}
         th {{
             background-color: #4CAF50;
@@ -562,80 +673,202 @@ async fn handle_http_monitor_dashboard(
             top: 0;
             cursor: pointer;
             user-select: none;
+            transition: background-color 0.2s;
         }}
         th:hover {{
             background-color: #45a049;
         }}
         th.sort-asc::after {{
-            content: ' \25B2';
+            content: '\2191';
             font-size: 0.8em;
         }}
         th.sort-desc::after {{
-            content: ' \25BC';
+            content: '\2193';
             font-size: 0.8em;
         }}
         td {{
-            padding: 10px;
-            border-bottom: 1px solid #ddd;
+            padding: 10px 12px;
+            border-bottom: 1px solid #eee;
         }}
         tr:hover {{
-            background-color: #f5f5f5;
+            background-color: #f8f9fa;
         }}
         .status-connected {{
             color: #4CAF50;
             font-weight: bold;
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
         }}
         .status-unverified {{
             color: #ff9800;
             font-weight: bold;
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
         }}
         .status-disconnected {{
             color: #f44336;
             font-weight: bold;
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+        }}
+        .status-connected::before {{
+            content: '\2022';
+            color: #4CAF50;
+            animation: pulse 2s infinite;
+        }}
+        .status-unverified::before {{
+            content: '\2022';
+            color: #ff9800;
+        }}
+        .status-disconnected::before {{
+            content: '\2022';
+            color: #f44336;
+        }}
+        @keyframes pulse {{
+            0% {{ opacity: 1; }}
+            50% {{ opacity: 0.5; }}
+            100% {{ opacity: 1; }}
+        }}
+        .expand-btn {{
+            background: none;
+            border: none;
+            cursor: pointer;
+            padding: 4px;
+            border-radius: 3px;
+            transition: background-color 0.2s;
+        }}
+        .expand-btn:hover {{
+            background-color: #f0f0f0;
+        }}
+        .details-row {{
+            display: none;
+            background-color: #fafafa;
+        }}
+        .details-row.show {{
+            display: table-row;
+        }}
+        .details-content {{
+            padding: 15px;
+            border-left: 3px solid #4CAF50;
+            margin: 10px;
+            background: white;
+            border-radius: 4px;
+        }}
+        .detail-item {{
+            margin-bottom: 8px;
+        }}
+        .detail-label {{
+            font-weight: bold;
+            color: #666;
         }}
         .timestamp {{
             color: #666;
             font-size: 0.9em;
         }}
+        .no-results {{
+            text-align: center;
+            padding: 40px;
+            color: #666;
+            font-style: italic;
+        }}
+        @media (max-width: 768px) {{
+            .controls {{
+                flex-direction: column;
+                align-items: stretch;
+            }}
+            .search-box {{
+                width: 100%;
+            }}
+            .stats {{
+                flex-wrap: wrap;
+            }}
+            table {{
+                font-size: 14px;
+            }}
+            th, td {{
+                padding: 8px;
+            }}
+        }}
     </style>
 </head>
 <body>
-    <h1>Peer Monitor on {}</h1>
+    <div class="header">
+        <h1>&#128279; Peer Monitor - {}</h1>
+        <div class="stats">
+            <div class="stat">
+                <div class="stat-number">{}</div>
+                <div>Total Peers</div>
+            </div>
+            <div class="stat">
+                <div class="stat-number">{}</div>
+                <div>Connected</div>
+            </div>
+            <div class="stat">
+                <div class="stat-number">{}</div>
+                <div>Alive</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="controls">
+        <input type="text" id="searchInput" class="search-box" placeholder="Search peers...">
+        <button id="refreshBtn" class="btn btn-primary">&#128259; Refresh Now</button>
+        <button id="clearBtn" class="btn btn-secondary">&#128465; Clear Search</button>
+    </div>
+
     <div class="info">
         <strong>Node Name:</strong> {}<br>
-        <strong>Total Connections:</strong> {}<br>
         <strong>Last Updated:</strong> {} UTC<br>
-        <em>Auto-refreshing every 5 seconds</em>
+        <em>Auto-refreshing every 5 seconds &#8226; Click column headers to sort</em>
     </div>
-    <table id="peerTable">
-        <thead>
-            <tr>
-                <th onclick="sortTable(0)">Hostname</th>
-                <th onclick="sortTable(1)">IP Address</th>
-                <th onclick="sortTable(2)">Status</th>
-                <th onclick="sortTable(3)">Alive</th>
-                <th onclick="sortTable(4)">Connected At</th>
-                <th onclick="sortTable(5)">Last Message</th>
-                <th onclick="sortTable(6)">Last Message Time</th>
-                <th onclick="sortTable(7)">Requests</th>
-                <th onclick="sortTable(8)">Last Heartbeat</th>
-            </tr>
-        </thead>
-        <tbody>
-            {}
-        </tbody>
-    </table>
+
+    <div class="table-container">
+        <table id="peerTable">
+            <thead>
+                <tr>
+                    <th onclick="sortTable(0)">Hostname</th>
+                    <th onclick="sortTable(1)">IP Address</th>
+                    <th onclick="sortTable(2)">Status</th>
+                    <th onclick="sortTable(3)">Alive</th>
+                    <th onclick="sortTable(4)">Connected At</th>
+                    <th onclick="sortTable(5)">Last Message</th>
+                    <th onclick="sortTable(6)">Requests</th>
+                    <th onclick="sortTable(7)">Last Heartbeat</th>
+                    <th title="Click to expand">&#9432;</th>
+                </tr>
+            </thead>
+            <tbody id="peerTableBody">
+                {}
+            </tbody>
+        </table>
+        <div id="noResults" class="no-results" style="display: none;">
+            No peers match your search criteria
+        </div>
+    </div>
+
     <script>
-        // Restore sort state from localStorage or initialize
+        // Restore sort state from localStorage
         let sortDirections = JSON.parse(localStorage.getItem('sortDirections')) || {{}};
         let currentSortColumn = localStorage.getItem('currentSortColumn');
-        
+        let searchTerm = '';
+
+        // Get DOM elements
+        const searchInput = document.getElementById('searchInput');
+        const refreshBtn = document.getElementById('refreshBtn');
+        const clearBtn = document.getElementById('clearBtn');
+        const peerTableBody = document.getElementById('peerTableBody');
+        const noResults = document.getElementById('noResults');
+
+        // Store original table rows
+        const originalRows = Array.from(peerTableBody.querySelectorAll('tr'));
+
         function sortTable(columnIndex) {{
-            const table = document.getElementById('peerTable');
-            const tbody = table.querySelector('tbody');
-            const rows = Array.from(tbody.querySelectorAll('tr'));
-            const headers = table.querySelectorAll('th');
-            
+            const rows = Array.from(peerTableBody.querySelectorAll('tr:not(.details-row)'));
+            const headers = document.querySelectorAll('#peerTable th');
+
             // Toggle sort direction
             if (!sortDirections[columnIndex]) {{
                 sortDirections[columnIndex] = 'asc';
@@ -644,80 +877,176 @@ async fn handle_http_monitor_dashboard(
             }} else {{
                 sortDirections[columnIndex] = 'asc';
             }}
-            
+
             const direction = sortDirections[columnIndex];
             currentSortColumn = columnIndex;
-            
+
             // Save sort state to localStorage
             localStorage.setItem('sortDirections', JSON.stringify(sortDirections));
             localStorage.setItem('currentSortColumn', currentSortColumn);
-            
+
             // Remove sort indicators from all headers
             headers.forEach(h => {{
                 h.classList.remove('sort-asc', 'sort-desc');
             }});
-            
+
             // Add sort indicator to current header
             headers[columnIndex].classList.add(direction === 'asc' ? 'sort-asc' : 'sort-desc');
-            
+
             // Sort rows
             rows.sort((a, b) => {{
                 const aValue = a.cells[columnIndex].textContent.trim();
                 const bValue = b.cells[columnIndex].textContent.trim();
-                
+
                 // Try to parse as numbers
                 const aNum = parseFloat(aValue);
                 const bNum = parseFloat(bValue);
-                
+
                 let comparison;
                 if (!isNaN(aNum) && !isNaN(bNum)) {{
                     comparison = aNum - bNum;
                 }} else {{
                     comparison = aValue.localeCompare(bValue);
                 }}
-                
+
                 return direction === 'asc' ? comparison : -comparison;
             }});
-            
-            // Clear and re-append sorted rows
-            tbody.innerHTML = '';
-            rows.forEach(row => tbody.appendChild(row));
+
+            // Clear and re-append sorted rows (including details rows)
+            peerTableBody.innerHTML = '';
+            rows.forEach(row => {{
+                peerTableBody.appendChild(row);
+                // Also append any associated details row
+                const detailsRow = row.nextElementSibling;
+                if (detailsRow && detailsRow.classList.contains('details-row')) {{
+                    peerTableBody.appendChild(detailsRow);
+                }}
+            }});
+
+            // Re-apply search filter after sorting
+            if (searchTerm) {{
+                filterTable(searchTerm);
+            }}
         }}
-        
+
+        function filterTable(term) {{
+            searchTerm = term.toLowerCase();
+            let visibleCount = 0;
+
+            // Process each pair of main row + details row
+            const allRows = peerTableBody.querySelectorAll('tr');
+            for (let i = 0; i < allRows.length; i++) {{
+                const row = allRows[i];
+                if (row.classList.contains('details-row')) continue; // Skip details rows
+
+                const detailsRow = allRows[i + 1];
+                const isDetailsRow = detailsRow && detailsRow.classList.contains('details-row');
+
+                // Check if row matches search
+                const text = row.textContent.toLowerCase();
+                const isVisible = text.includes(searchTerm);
+
+                row.style.display = isVisible ? '' : 'none';
+                if (isDetailsRow) {{
+                    detailsRow.style.display = isVisible ? '' : 'none';
+                }}
+
+                if (isVisible) visibleCount++;
+                if (isDetailsRow) i++; // Skip the details row in the loop
+            }}
+
+            noResults.style.display = visibleCount === 0 && searchTerm ? 'block' : 'none';
+        }}
+
+        function refreshPage() {{
+            location.reload();
+        }}
+
+        function toggleDetails(button) {{
+            const row = button.closest('tr');
+            const detailsRow = row.nextElementSibling;
+
+            if (detailsRow && detailsRow.classList.contains('details-row')) {{
+                const isExpanded = detailsRow.classList.contains('show');
+                if (isExpanded) {{
+                    detailsRow.classList.remove('show');
+                    button.innerHTML = '&#9654;';
+                }} else {{
+                    detailsRow.classList.add('show');
+                    button.innerHTML = '&#9660;';
+                }}
+            }}
+        }}
+
+        // Event listeners
+        searchInput.addEventListener('input', (e) => {{
+            filterTable(e.target.value);
+        }});
+
+        refreshBtn.addEventListener('click', refreshPage);
+
+        clearBtn.addEventListener('click', () => {{
+            searchInput.value = '';
+            filterTable('');
+        }});
+
+        // Keyboard shortcuts
+        document.addEventListener('keydown', (e) => {{
+            if (e.ctrlKey || e.metaKey) {{
+                if (e.key === 'f') {{
+                    e.preventDefault();
+                    searchInput.focus();
+                }} else if (e.key === 'r') {{
+                    e.preventDefault();
+                    refreshPage();
+                }}
+            }}
+        }});
+
         // Apply saved sort on page load
         window.addEventListener('DOMContentLoaded', function() {{
             if (currentSortColumn !== null && currentSortColumn !== undefined) {{
                 const columnIndex = parseInt(currentSortColumn);
                 const headers = document.querySelectorAll('#peerTable th');
                 const direction = sortDirections[columnIndex] || 'asc';
-                
+
                 // Restore sort indicator
                 headers[columnIndex].classList.add(direction === 'asc' ? 'sort-asc' : 'sort-desc');
-                
+
                 // Re-apply sort
-                const table = document.getElementById('peerTable');
-                const tbody = table.querySelector('tbody');
-                const rows = Array.from(tbody.querySelectorAll('tr'));
-                
+                const rows = Array.from(peerTableBody.querySelectorAll('tr:not(.details-row)'));
+
                 rows.sort((a, b) => {{
                     const aValue = a.cells[columnIndex].textContent.trim();
                     const bValue = b.cells[columnIndex].textContent.trim();
-                    
+
                     const aNum = parseFloat(aValue);
                     const bNum = parseFloat(bValue);
-                    
+
                     let comparison;
                     if (!isNaN(aNum) && !isNaN(bNum)) {{
                         comparison = aNum - bNum;
                     }} else {{
                         comparison = aValue.localeCompare(bValue);
                     }}
-                    
+
                     return direction === 'asc' ? comparison : -comparison;
                 }});
-                
-                tbody.innerHTML = '';
-                rows.forEach(row => tbody.appendChild(row));
+
+                // Rebuild table with sorted rows
+                peerTableBody.innerHTML = '';
+                rows.forEach(row => {{
+                    peerTableBody.appendChild(row);
+                    const detailsRow = row.nextElementSibling;
+                    if (detailsRow && detailsRow.classList.contains('details-row')) {{
+                        peerTableBody.appendChild(detailsRow);
+                    }}
+                }});
+            }}
+
+            // Focus search input if it has a value
+            if (searchInput.value) {{
+                searchInput.focus();
             }}
         }});
     </script>
@@ -725,9 +1054,11 @@ async fn handle_http_monitor_dashboard(
 </html>"#,
         node_name,
         node_name,
+        total_peers,
+        connected_count,
+        alive_count,
         node_name,
-        conn_list.len(),
-        time::OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339).unwrap_or_else(|_| String::from("unknown")),
+        last_updated,
         table_rows
     );
     
