@@ -42,17 +42,17 @@ pub(crate) struct ConnectionInfo {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Ensure certificate exists (generate if needed)
     cert_manager::ensure_certificate()?;
-    
+
     // Display our certificate fingerprint
     let fingerprint = cert_manager::get_cert_fingerprint()?;
     log!("Our fingerprint: {}", fingerprint);
-    
+
     // Create shared state for tracking verified peers
     let verified_peers: Arc<RwLock<HashSet<String>>> = Arc::new(RwLock::new(HashSet::new()));
-    
+
     // Create shared state for tracking active connections
     let connections: Arc<RwLock<HashMap<String, ConnectionInfo>>> = Arc::new(RwLock::new(HashMap::new()));
-    
+
     // Load TLS certificate and private key
     let certs = load_certs(cert_manager::get_cert_path())?;
     let key = load_private_key(cert_manager::get_key_path())?;
@@ -63,13 +63,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_no_client_auth()
         .with_single_cert(certs, key)
         .map_err(|e| e.to_string())?;
-    
+
     let acceptor = TlsAcceptor::from(Arc::new(config));
 
     // Bind HTTP listener on port 39000 (for monitor dashboard)
     let http_listener = TcpListener::bind("0.0.0.0:39000").await?;
     log!("HTTP monitor dashboard listening on port 39000");
-    
+
     // Bind HTTPS listener on port 39001 (for secure communication)
     let https_listener = TcpListener::bind("0.0.0.0:39001").await?;
     log!("HTTPS server listening on port 39001 (all subsequent requests)");
@@ -78,7 +78,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Setup Ctrl-C handler
     let shutdown = Arc::new(tokio::sync::Notify::new());
     let shutdown_clone = shutdown.clone();
-    
+
     tokio::spawn(async move {
         tokio::signal::ctrl_c().await.expect("Failed to listen for Ctrl-C");
         log!("[SHUTDOWN] Received Ctrl-C, shutting down gracefully...");
@@ -90,27 +90,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Ok(trusted) = peer_trust::TrustedPeers::load() {
         let peer_list = trusted.list_peers();
         log!("[STARTUP] Found {} previously trusted peers", peer_list.len());
-        
+
         for (peer_addr, peer_info) in peer_list {
             // Parse address to get IP and port
             let parts: Vec<&str> = peer_addr.split(':').collect();
             if parts.len() != 2 {
                 continue;
             }
-            
+
             let peer_ip = parts[0].to_string();
             let peer_port = match parts[1].parse::<u16>() {
                 Ok(p) => p,
                 Err(_) => continue,
             };
-            
+
             log!("[STARTUP] Attempting to reconnect to {} ({})", peer_addr, peer_info.hostname);
-            
+
             let verified_peers_clone = verified_peers.clone();
             let connections_clone = connections.clone();
             let peer_addr_clone = peer_addr.clone();
             let peer_hostname = peer_info.hostname.clone();
-            
+
             // Spawn reconnection attempt in background
             tokio::spawn(async move {
                 // Add to verified peers before connecting to prevent loops
@@ -118,7 +118,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let mut peers = verified_peers_clone.write().await;
                     peers.insert(peer_addr_clone.clone());
                 }
-                
+
                 let reconnect_success = match peer_client::connect_to_peer(&peer_ip, peer_port, true).await {
                     Ok(_) => {
                         log!("[STARTUP] ✓ Successfully reconnected to {} ({})", peer_addr_clone, peer_hostname);
@@ -129,13 +129,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         false
                     }
                 };
-                
+
                 if reconnect_success {
                     // Add to connections tracking
                     let now_utc = time::OffsetDateTime::now_utc();
                     let timestamp = now_utc.format(&time::format_description::well_known::Rfc3339)
                         .unwrap_or_else(|_| String::from("unknown"));
-                    
+
                     let mut conns = connections_clone.write().await;
                     conns.entry(peer_addr_clone.clone())
                         .or_insert_with(|| {
@@ -153,6 +153,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 alive: true,
                             }
                         });
+
+                    // Exchange peer lists with successfully reconnected peers
+                    let verified_peers_exchange = verified_peers_clone.clone();
+                    let connections_exchange = connections_clone.clone();
+                    let peer_ip_exchange = peer_ip.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = exchange_peer_lists(&peer_ip_exchange, peer_port, &verified_peers_exchange, &connections_exchange).await {
+                            log!("[STARTUP] Failed to exchange peer lists with {}: {}", peer_addr_clone, e);
+                        }
+                    });
                 } else {
                     // Remove from verified peers if connection failed
                     let mut peers = verified_peers_clone.write().await;
@@ -163,12 +173,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         log!("[STARTUP] No previously trusted peers found");
     }
-    
+
     // Start heartbeat background task
     let connections_heartbeat = connections.clone();
     let _heartbeat_task = heartbeat::start_heartbeat_task(connections_heartbeat);
     log!("[HEARTBEAT] Background heartbeat task started");
-    
+
     // Spawn HTTP listener task for monitor dashboard
     let connections_http = connections.clone();
     let shutdown_http = shutdown.clone();
@@ -180,7 +190,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         Ok((stream, addr)) => {
                             let client_ip = addr.ip();
                             log!("[HTTP] Monitor request from {} (port: {})", client_ip, addr.port());
-                            
+
                             let connections_clone = connections_http.clone();
                             tokio::spawn(async move {
                                 if let Err(e) = handle_http_monitor_dashboard(stream, client_ip, &connections_clone).await {
@@ -203,7 +213,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     loop {
         tokio::select! {
             result = https_listener.accept() => {
-                let (stream, addr) = result?;
+        let (stream, addr) = result?;
         let client_ip = addr.ip();
         log!("[HTTPS] New connection from {} (port: {})", client_ip, addr.port());
 
@@ -218,7 +228,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             match tls_stream {
                 Ok(mut stream) => {
                     log!("[TLS] ✓ Handshake successful with {}", client_ip);
-                    
+
                     // Read the request first to check for custom port header
                     let mut buf = [0u8; 1024];
                     match stream.read(&mut buf).await {
@@ -227,10 +237,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let request = String::from_utf8_lossy(&buf[..n]);
                             let first_line = request.lines().next().unwrap_or("<empty>");
                             log!("[HTTP] Request from {}: {}", client_ip, first_line);
-                            
+
                             // Extract the path
                             let path = extract_path(&request).unwrap_or_else(|| "/".to_string());
-                            
+
                             // Handle /heartbeat endpoint (respond to alive checks)
                             if path == "/heartbeat" {
                                 log!("[HEARTBEAT] Received heartbeat request from {}", client_ip);
@@ -240,7 +250,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                                 return;
                             }
-                            
+
                             // Handle /monitor endpoint (localhost only)
                             if path == "/monitor" {
                                 if is_localhost(&client_ip) {
@@ -254,12 +264,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                                 return;
                             }
-                            
+
                             // Extract peer port and hostname from headers
                             let peer_port = extract_peer_port(&request).unwrap_or(39001);
                             let peer_hostname = extract_hostname(&request);
                             let peer_key = format!("{}:{}", client_ip, peer_port);
-                            
+
                             // Update peer_trust with hostname if provided
                             if let Some(ref hostname) = peer_hostname {
                                 if let Ok(mut trusted) = peer_trust::TrustedPeers::load() {
@@ -270,13 +280,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                 }
                             }
-                            
+
                             // Check if peer is already verified
                             let already_verified = {
                                 let peers = verified_peers_https.read().await;
                                 peers.contains(&peer_key)
                             };
-                            
+
                             let peer_verified = if already_verified {
                                 log!("[PEER] Peer {} already verified, skipping certificate exchange", peer_key);
                                 true
@@ -286,13 +296,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let mut peers = verified_peers_https.write().await;
                                     peers.insert(peer_key.clone());
                                 }
-                                
+
                                 // Initiate reverse connection to verify peer's certificate
                                 log!("[PEER] Initiating reverse connection to {}", peer_key);
                                 let connection_succeeded = match peer_client::connect_to_peer(&client_ip.to_string(), peer_port, true).await {
                                     Ok(_) => {
                                         log!("[PEER] ✓ Mutual trust established with {}", peer_key);
-                                        
+
                                         // Exchange peer lists after successful verification
                                         let verified_peers_clone = verified_peers_https.clone();
                                         let connections_clone2 = connections_clone.clone();
@@ -302,7 +312,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 log!("[MESH] Failed to exchange peer lists with {}: {}", client_ip_str, e);
                                             }
                                         });
-                                        
+
                                         true
                                     }
                                     Err(e) => {
@@ -311,22 +321,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         false
                                     }
                                 };
-                                
+
                                 // Remove from verified peers if connection failed
                                 if !connection_succeeded {
                                     let mut peers = verified_peers_https.write().await;
                                     peers.remove(&peer_key);
                                 }
-                                
+
                                 connection_succeeded
                             };
-                            
+
                             // Track connection
                             {
                                 let now_utc = time::OffsetDateTime::now_utc();
                                 let timestamp = now_utc.format(&time::format_description::well_known::Rfc3339)
                                     .unwrap_or_else(|_| String::from("unknown"));
-                                
+
                                 let mut conns = connections_clone.write().await;
                                 let is_new = !conns.contains_key(&peer_key);
                                 conns.entry(peer_key.clone())
@@ -392,7 +402,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
-    
+
     log!("[SHUTDOWN] Server stopped. Goodbye!");
     Ok(())
 }
@@ -403,35 +413,35 @@ async fn handle_http_monitor_dashboard(
     connections: &Arc<RwLock<HashMap<String, ConnectionInfo>>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    
+
     // Read the HTTP request to determine the path
     let mut buf = [0u8; 1024];
     let n = stream.read(&mut buf).await?;
     if n == 0 {
         return Ok(());
     }
-    
+
     let request = String::from_utf8_lossy(&buf[..n]);
     let path = extract_path(&request).unwrap_or_else(|| "/".to_string());
-    
+
     // Handle /initiate endpoint
     if path == "/initiate" {
         log!("[INITIATE] Certificate exchange initiation requested from {}", client_ip);
-        
+
         // Trigger certificate exchange with the requesting peer
         let peer_port = 39001; // Default HTTPS port
         let peer_key = format!("{}:{}", client_ip, peer_port);
-        
+
         let connection_succeeded = peer_client::connect_to_peer(&client_ip.to_string(), peer_port, true).await.is_ok();
-        
+
         if connection_succeeded {
             log!("[INITIATE] ✓ Successfully connected to peer: {}", peer_key);
-            
+
             // Add to connections tracking
             let now_utc = time::OffsetDateTime::now_utc();
             let timestamp = now_utc.format(&time::format_description::well_known::Rfc3339)
                 .unwrap_or_else(|_| String::from("unknown"));
-            
+
             let mut conns = connections.write().await;
             conns.entry(peer_key.clone())
                 .or_insert_with(|| {
@@ -453,26 +463,26 @@ async fn handle_http_monitor_dashboard(
         } else {
             log!("[INITIATE] ⚠ Failed to connect to peer {}: connection error", peer_key);
         }
-        
+
         // Redirect to dashboard
         let redirect_response = "HTTP/1.1 303 See Other\r\nLocation: /\r\nContent-Length: 0\r\n\r\n";
         stream.write_all(redirect_response.as_bytes()).await?;
         stream.flush().await?;
-        
+
         log!("[INITIATE] Redirecting to dashboard");
         return Ok(());
     }
-    
+
     // Serve dashboard for root path
     log!("[MONITOR] Serving HTML dashboard");
-    
+
     // Get node name
     let node_name = match gethostname::gethostname().to_str() {
         Some(name) => name.to_string(),
         None => "Unknown".to_string(),
     };
     log!("[MONITOR] Node name: {}", node_name);
-    
+
     // Get connection data
     let conns = connections.read().await;
     let mut conn_list: Vec<ConnectionInfo> = conns.values().cloned().collect();
@@ -484,7 +494,7 @@ async fn handle_http_monitor_dashboard(
     let connected_count = conn_list.iter().filter(|c| c.status == "Connected").count();
     let alive_count = conn_list.iter().filter(|c| c.alive).count();
     let last_updated = time::OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339).unwrap_or_else(|_| String::from("unknown"));
-    
+
     // Build HTML table rows with expandable details
     let table_rows: String = conn_list.iter().map(|conn| {
         let status_class = match conn.status.as_str() {
@@ -567,7 +577,7 @@ async fn handle_http_monitor_dashboard(
 
         format!("{}{}", main_row, details_row)
     }).collect::<Vec<_>>().join("\n");
-    
+
     let html = format!(r#"<!DOCTYPE html>
 <html>
 <head>
@@ -1013,7 +1023,7 @@ async fn handle_http_monitor_dashboard(
                 // Restore sort indicator
                 headers[columnIndex].classList.add(direction === 'asc' ? 'sort-asc' : 'sort-desc');
 
-                // Re-apply sort
+                // Reapply sort
                 const rows = Array.from(peerTableBody.querySelectorAll('tr:not(.details-row)'));
 
                 rows.sort((a, b) => {{
@@ -1061,7 +1071,7 @@ async fn handle_http_monitor_dashboard(
         last_updated,
         table_rows
     );
-    
+
     let response = format!(
         "HTTP/1.1 200 OK\r\n\
          Content-Type: text/html\r\n\
@@ -1071,10 +1081,10 @@ async fn handle_http_monitor_dashboard(
         html.len(),
         html
     );
-    
+
     stream.write_all(response.as_bytes()).await?;
     stream.flush().await?;
-    
+
     log!("[MONITOR] ✓ Dashboard served");
     Ok(())
 }
@@ -1106,19 +1116,19 @@ async fn exchange_peer_lists(
     connections: &Arc<RwLock<HashMap<String, ConnectionInfo>>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     log!("[MESH] Exchanging peer lists with {}:{}", peer_ip, peer_port);
-    
+
     // Get our current verified peer list
     let our_peers: Vec<String> = {
         let peers = verified_peers.read().await;
         peers.iter().cloned().collect()
     };
-    
+
     log!("[MESH] We have {} verified peers to share", our_peers.len());
-    
+
     // Load trusted peers from file to get their peer lists
     let trusted = peer_trust::TrustedPeers::load()?;
     let all_trusted_peers = trusted.list_peers();
-    
+
     // Build list of peer addresses to share (exclude the peer we're talking to)
     let current_peer = format!("{}:{}", peer_ip, peer_port);
     let peers_to_share: Vec<(String, String)> = all_trusted_peers
@@ -1126,9 +1136,9 @@ async fn exchange_peer_lists(
         .map(|(addr, info)| (addr.clone(), info.hostname.clone()))
         .filter(|(addr, _)| addr != &current_peer)
         .collect();
-    
+
     log!("[MESH] Sharing {} trusted peer addresses", peers_to_share.len());
-    
+
     // For each shared peer address, try to connect if not already verified
     for (peer_addr, peer_hostname) in peers_to_share {
         // Parse IP and port
@@ -1136,13 +1146,13 @@ async fn exchange_peer_lists(
         if parts.len() != 2 {
             continue;
         }
-        
+
         let new_peer_ip = parts[0].to_string();
         let new_peer_port = match parts[1].parse::<u16>() {
             Ok(p) => p,
             Err(_) => continue,
         };
-        
+
         // Skip if already verified
         {
             let peers = verified_peers.read().await;
@@ -1150,17 +1160,17 @@ async fn exchange_peer_lists(
                 continue;
             }
         }
-        
+
         // Try to connect to this new peer
         log!("[MESH] Discovered new peer from {}: {}", current_peer, peer_addr);
         log!("[MESH] Attempting to connect to {}", peer_addr);
-        
+
         // Add to verified peers before connecting to prevent loops
         {
             let mut peers = verified_peers.write().await;
             peers.insert(peer_addr.clone());
         }
-        
+
         // Spawn connection attempt
         let verified_peers_clone = verified_peers.clone();
         let connections_clone = connections.clone();
@@ -1178,13 +1188,13 @@ async fn exchange_peer_lists(
                     false
                 }
             };
-            
+
             if connection_succeeded {
                 // Add to connections tracking
                 let now_utc = time::OffsetDateTime::now_utc();
                 let timestamp = now_utc.format(&time::format_description::well_known::Rfc3339)
                     .unwrap_or_else(|_| String::from("unknown"));
-                
+
                 let mut conns = connections_clone.write().await;
                 conns.entry(peer_addr_clone.clone())
                     .or_insert_with(|| {
@@ -1209,7 +1219,7 @@ async fn exchange_peer_lists(
             }
         });
     }
-    
+
     Ok(())
 }
 
@@ -1263,20 +1273,20 @@ async fn handle_monitor_request(
     connections: &Arc<RwLock<HashMap<String, ConnectionInfo>>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use tokio::io::AsyncWriteExt;
-    
+
     log!("[MONITOR] Serving monitor request");
-    
+
     // Get connection data
     let conns = connections.read().await;
     let conn_list: Vec<ConnectionInfo> = conns.values().cloned().collect();
-    
+
     // Build JSON response
     let body = serde_json::json!({
         "total_connections": conn_list.len(),
         "connections": conn_list
     });
     let body_str = body.to_string();
-    
+
     // Send response
     let response = format!(
         "HTTP/1.1 200 OK\r\n\
@@ -1287,10 +1297,10 @@ async fn handle_monitor_request(
         body_str.len(),
         body_str
     );
-    
+
     stream.write_all(response.as_bytes()).await?;
     stream.flush().await?;
-    
+
     log!("[MONITOR] ✓ Monitor data sent");
     Ok(())
 }
