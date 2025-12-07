@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::collections::HashMap;
 use tokio::sync::RwLock;
 use crate::cert_verifier::TofuServerCertVerifier;
-use crate::ConnectionInfo;
+use plan1::ConnectionInfo;
 
 // Macro for timestamped logging
 macro_rules! log {
@@ -94,7 +94,7 @@ pub(crate) async fn send_heartbeats_to_all(
     
     log!("[HEARTBEAT] Sending heartbeats to {} peers", peers_to_check.len());
     
-    for (peer_key, ip) in peers_to_check {
+    for (peer_key, ip_str) in peers_to_check {
         // Parse peer address to get port
         let parts: Vec<&str> = peer_key.split(':').collect();
         if parts.len() != 2 {
@@ -119,7 +119,7 @@ pub(crate) async fn send_heartbeats_to_all(
         }
         
         // Send heartbeat
-        let heartbeat_success = match send_heartbeat_to_peer(&ip, port).await {
+        let heartbeat_success = match send_heartbeat_to_peer(&ip_str, port).await {
             Ok(_) => {
                 log!("[HEARTBEAT] ✓ Peer {} is alive", peer_key);
                 true

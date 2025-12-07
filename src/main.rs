@@ -1,18 +1,20 @@
-use std::{fs, sync::Arc};
+use std::{fs, sync::Arc, borrow::Cow};
 use std::collections::{HashSet, HashMap};
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 use rustls::{ServerConfig, Certificate, PrivateKey};
 use tokio_rustls::TlsAcceptor;
 use tokio::io::{AsyncReadExt, AsyncWriteExt}; // Import the async traits
-use serde::Serialize;
+
 use std::net::IpAddr;
+use plan1::ConnectionInfo;
 
 pub mod cert_manager;
 pub mod peer_trust;
 pub mod peer_client;
 pub mod cert_verifier;
 pub mod heartbeat;
+pub mod broadcast;
 
 // Macro for timestamped logging
 macro_rules! log {
@@ -23,20 +25,7 @@ macro_rules! log {
     }};
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub(crate) struct ConnectionInfo {
-    hostname: String,
-    ip_address: String,
-    status: String,
-    connected_at: String,
-    last_message: String,
-    last_message_time: String,
-    request_count: usize,
-    verified: bool,
-    last_heartbeat_sent: Option<String>,
-    last_heartbeat_received: Option<String>,
-    alive: bool,
-}
+
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -178,6 +167,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let connections_heartbeat = connections.clone();
     let _heartbeat_task = heartbeat::start_heartbeat_task(connections_heartbeat);
     log!("[HEARTBEAT] Background heartbeat task started");
+
+    // Start broadcast listener background task
+    let verified_peers_broadcast = verified_peers.clone();
+    let connections_broadcast = connections.clone();
+    let _broadcast_task = tokio::spawn(async move {
+        if let Err(e) = broadcast::start_broadcast_listener(verified_peers_broadcast, connections_broadcast).await {
+            log!("[BROADCAST] Error starting broadcast listener: {}", e);
+        }
+    });
+    log!("[BROADCAST] Background broadcast listener task started");
+
+
 
     // Spawn HTTP listener task for monitor dashboard
     let connections_http = connections.clone();
@@ -470,6 +471,110 @@ async fn handle_http_monitor_dashboard(
         stream.flush().await?;
 
         log!("[INITIATE] Redirecting to dashboard");
+        return Ok(());
+    }
+
+    // Handle /broadcast endpoint
+    if path == "/broadcast" {
+        log!("[BROADCAST] Manual broadcast requested from {}", client_ip);
+
+        // Send a broadcast message
+        if let Err(e) = broadcast::send_broadcast().await {
+            log!("[BROADCAST] Error sending broadcast: {}", e);
+        } else {
+            log!("[BROADCAST] ✓ Broadcast sent successfully");
+        }
+
+        // Redirect to dashboard
+        let redirect_response = "HTTP/1.1 303 See Other\r\nLocation: /\r\nContent-Length: 0\r\n\r\n";
+        stream.write_all(redirect_response.as_bytes()).await?;
+        stream.flush().await?;
+
+        log!("[BROADCAST] Redirecting to dashboard");
+        return Ok(());
+    }
+
+    // Handle /connect endpoint
+    if path.starts_with("/connect") {
+        // Extract hostname from query parameter
+        let hostname = if let Some(query_start) = path.find('?') {
+            let query = &path[query_start + 1..];
+            if let Some(host_param) = query.strip_prefix("hostname=") {
+                Some(urlencoding::decode(host_param).unwrap_or_else(|_| Cow::Borrowed(host_param)).to_string())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if let Some(hostname) = hostname {
+            if hostname.is_empty() {
+                log!("[CONNECT] Empty hostname provided from {}", client_ip);
+            } else {
+                log!("[CONNECT] Connection requested to hostname '{}' from {}", hostname, client_ip);
+
+                // Try to resolve hostname to IP
+                match tokio::net::lookup_host(format!("{}:39001", hostname)).await {
+                    Ok(mut addrs) => {
+                        if let Some(addr) = addrs.next() {
+                            let peer_ip = addr.ip().to_string();
+                            let peer_port = 39001;
+                            let peer_key = format!("{}:{}", peer_ip, peer_port);
+
+                            log!("[CONNECT] Resolved '{}' to {}, attempting connection", hostname, peer_ip);
+
+                            // Try to connect to the resolved peer
+                            let connection_succeeded = peer_client::connect_to_peer(&peer_ip, peer_port, true).await.is_ok();
+
+                            if connection_succeeded {
+                                log!("[CONNECT] ✓ Successfully connected to {} ({})", peer_key, hostname);
+
+                                // Add to connections tracking
+                                let now_utc = time::OffsetDateTime::now_utc();
+                                let timestamp = now_utc.format(&time::format_description::well_known::Rfc3339)
+                                    .unwrap_or_else(|_| String::from("unknown"));
+
+                                let mut conns = connections.write().await;
+                                conns.entry(peer_key.clone())
+                                    .or_insert_with(|| {
+                                        ConnectionInfo {
+                                            hostname: hostname.clone(),
+                                            ip_address: peer_ip.clone(),
+                                            status: "Connected (Manual)".to_string(),
+                                            connected_at: timestamp.clone(),
+                                            last_message: "Manual connection".to_string(),
+                                            last_message_time: timestamp,
+                                            request_count: 1,
+                                            verified: true,
+                                            last_heartbeat_sent: None,
+                                            last_heartbeat_received: None,
+                                            alive: true,
+                                        }
+                                    });
+                                log!("[CONNECT] Added connection: {} (Total: {})", peer_key, conns.len());
+                            } else {
+                                log!("[CONNECT] ⚠ Failed to connect to {} ({})", peer_key, hostname);
+                            }
+                        } else {
+                            log!("[CONNECT] Could not resolve hostname '{}' from {}", hostname, client_ip);
+                        }
+                    }
+                    Err(e) => {
+                        log!("[CONNECT] DNS resolution failed for '{}' from {}: {}", hostname, client_ip, e);
+                    }
+                }
+            }
+        } else {
+            log!("[CONNECT] No hostname parameter provided from {}", client_ip);
+        }
+
+        // Redirect to dashboard
+        let redirect_response = "HTTP/1.1 303 See Other\r\nLocation: /\r\nContent-Length: 0\r\n\r\n";
+        stream.write_all(redirect_response.as_bytes()).await?;
+        stream.flush().await?;
+
+        log!("[CONNECT] Redirecting to dashboard");
         return Ok(());
     }
 
@@ -829,6 +934,12 @@ async fn handle_http_monitor_dashboard(
         <button id="clearBtn" class="btn btn-secondary">&#128465; Clear Search</button>
     </div>
 
+    <div class="controls">
+        <button id="broadcastBtn" class="btn btn-primary" style="background-color: #FF9800;">&#128226; Send Broadcast</button>
+        <input type="text" id="hostnameInput" class="search-box" placeholder="Enter hostname to connect..." style="margin-left: 15px;">
+        <button id="connectBtn" class="btn btn-primary">&#128279; Connect to Host</button>
+    </div>
+
     <div class="info">
         <strong>Node Name:</strong> {}<br>
         <strong>Last Updated:</strong> {} UTC<br>
@@ -869,6 +980,9 @@ async fn handle_http_monitor_dashboard(
         const searchInput = document.getElementById('searchInput');
         const refreshBtn = document.getElementById('refreshBtn');
         const clearBtn = document.getElementById('clearBtn');
+        const broadcastBtn = document.getElementById('broadcastBtn');
+        const hostnameInput = document.getElementById('hostnameInput');
+        const connectBtn = document.getElementById('connectBtn');
         const peerTableBody = document.getElementById('peerTableBody');
         const noResults = document.getElementById('noResults');
 
@@ -998,6 +1112,50 @@ async fn handle_http_monitor_dashboard(
         clearBtn.addEventListener('click', () => {{
             searchInput.value = '';
             filterTable('');
+        }});
+
+        broadcastBtn.addEventListener('click', () => {{
+            fetch('/broadcast')
+                .then(response => {{
+                    if (response.ok) {{
+                        location.reload();
+                    }} else {{
+                        alert('Failed to send broadcast');
+                    }}
+                }})
+                .catch(error => {{
+                    console.error('Broadcast error:', error);
+                    alert('Failed to send broadcast');
+                }});
+        }});
+
+        connectBtn.addEventListener('click', () => {{
+            const hostname = hostnameInput.value.trim();
+            if (hostname) {{
+                const encodedHostname = encodeURIComponent(hostname);
+                fetch(`/connect?hostname=${{encodedHostname}}`)
+                    .then(response => {{
+                        if (response.ok) {{
+                            hostnameInput.value = '';
+                            location.reload();
+                        }} else {{
+                            alert('Failed to connect to host');
+                        }}
+                    }})
+                    .catch(error => {{
+                        console.error('Connect error:', error);
+                        alert('Failed to connect to host');
+                    }});
+            }} else {{
+                alert('Please enter a hostname');
+                hostnameInput.focus();
+            }}
+        }});
+
+        hostnameInput.addEventListener('keypress', (e) => {{
+            if (e.key === 'Enter') {{
+                connectBtn.click();
+            }}
         }});
 
         // Keyboard shortcuts
