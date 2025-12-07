@@ -247,8 +247,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             // Extract version information from headers
                             let peer_version = extract_version(&request);
 
-                            // Get our current version
-                            let our_version = env!("CARGO_PKG_VERSION").to_string();
+                            // Get our current version (unused for now but kept for future features)
+                            let _our_version = env!("CARGO_PKG_VERSION").to_string();
 
                             // Handle /heartbeat endpoint (respond to alive checks)
                             if path == "/heartbeat" {
