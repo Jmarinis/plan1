@@ -7,7 +7,7 @@ use tokio_rustls::TlsAcceptor;
 use tokio::io::{AsyncReadExt, AsyncWriteExt}; // Import the async traits
 
 use std::net::IpAddr;
-use plan1::ConnectionInfo;
+use plan1::{ConnectionInfo, VersionInfo};
 
 pub mod cert_manager;
 pub mod peer_trust;
@@ -128,19 +128,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let mut conns = connections_clone.write().await;
                     conns.entry(peer_addr_clone.clone())
                         .or_insert_with(|| {
-                            ConnectionInfo {
-                                hostname: peer_hostname.clone(),
-                                ip_address: peer_ip.clone(),
-                                status: "Connected".to_string(),
-                                connected_at: timestamp.clone(),
-                                last_message: "Startup reconnection".to_string(),
-                                last_message_time: timestamp,
-                                request_count: 0,
-                                verified: true,
-                                last_heartbeat_sent: None,
-                                last_heartbeat_received: None,
-                                alive: true,
-                            }
+                        ConnectionInfo {
+                            hostname: peer_hostname.clone(),
+                            ip_address: peer_ip.clone(),
+                            status: "Connected".to_string(),
+                            connected_at: timestamp.clone(),
+                            last_message: "Startup reconnection".to_string(),
+                            last_message_time: timestamp,
+                            request_count: 0,
+                            verified: true,
+                            last_heartbeat_sent: None,
+                            last_heartbeat_received: None,
+                            alive: true,
+                            current_version: None,
+                            version_history: vec![],
+                        }
                         });
 
                     // Exchange peer lists with successfully reconnected peers
@@ -241,6 +243,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                             // Extract the path
                             let path = extract_path(&request).unwrap_or_else(|| "/".to_string());
+
+                            // Extract version information from headers
+                            let peer_version = extract_version(&request);
+
+                            // Get our current version
+                            let our_version = env!("CARGO_PKG_VERSION").to_string();
 
                             // Handle /heartbeat endpoint (respond to alive checks)
                             if path == "/heartbeat" {
@@ -350,8 +358,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         if let Some(ref h) = peer_hostname {
                                             info.hostname = h.clone();
                                         }
+                                        // Update version history if peer version provided
+                                        if let Some(ref pv) = peer_version {
+                                            update_version_history(info, pv, &timestamp);
+                                        }
                                     })
                                     .or_insert_with(|| {
+                                        let mut version_history = vec![];
+                                        // Initialize version history for new connections
+                                        if let Some(ref pv) = peer_version {
+                                            version_history.push(VersionInfo {
+                                                version: pv.clone(),
+                                                first_seen: timestamp.clone(),
+                                                last_seen: timestamp.clone(),
+                                                seen_count: 1,
+                                            });
+                                        }
+
                                         ConnectionInfo {
                                             hostname: peer_hostname.clone().unwrap_or_else(|| format!("peer-{}", client_ip)),
                                             ip_address: client_ip.to_string(),
@@ -364,6 +387,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             last_heartbeat_sent: None,
                                             last_heartbeat_received: None,
                                             alive: true,
+                                            current_version: peer_version.clone(),
+                                            version_history,
                                         }
                                     });
                                 if is_new {
@@ -446,19 +471,21 @@ async fn handle_http_monitor_dashboard(
             let mut conns = connections.write().await;
             conns.entry(peer_key.clone())
                 .or_insert_with(|| {
-                    ConnectionInfo {
-                        hostname: format!("peer-{}", client_ip),
-                        ip_address: client_ip.to_string(),
-                        status: "Connected".to_string(),
-                        connected_at: timestamp.clone(),
-                        last_message: "Initiated via /initiate".to_string(),
-                        last_message_time: timestamp,
-                        request_count: 1,
-                        verified: true,
-                        last_heartbeat_sent: None,
-                        last_heartbeat_received: None,
-                        alive: true,
-                    }
+                        ConnectionInfo {
+                            hostname: format!("peer-{}", client_ip),
+                            ip_address: client_ip.to_string(),
+                            status: "Connected".to_string(),
+                            connected_at: timestamp.clone(),
+                            last_message: "Initiated via /initiate".to_string(),
+                            last_message_time: timestamp,
+                            request_count: 1,
+                            verified: true,
+                            last_heartbeat_sent: None,
+                            last_heartbeat_received: None,
+                            alive: true,
+                            current_version: None,
+                            version_history: vec![],
+                        }
                 });
             log!("[INITIATE] Added connection: {} (Total: {})", peer_key, conns.len());
         } else {
@@ -550,6 +577,8 @@ async fn handle_http_monitor_dashboard(
                                             last_heartbeat_sent: None,
                                             last_heartbeat_received: None,
                                             alive: true,
+                                            current_version: None,
+                                            version_history: vec![],
                                         }
                                     });
                                 log!("[CONNECT] Added connection: {} (Total: {})", peer_key, conns.len());
@@ -624,6 +653,7 @@ async fn handle_http_monitor_dashboard(
             "<tr>
                 <td>{}</td>
                 <td>{}</td>
+                <td>{}</td>
                 <td><span class=\"{}\">{}</span></td>
                 <td><span class=\"{}\">{}</span></td>
                 <td>{}</td>
@@ -634,6 +664,7 @@ async fn handle_http_monitor_dashboard(
             </tr>",
             conn.hostname,
             conn.ip_address,
+            conn.current_version.as_deref().unwrap_or("Unknown"),
             status_class,
             conn.status,
             alive_class,
@@ -647,7 +678,7 @@ async fn handle_http_monitor_dashboard(
         // Details row
         let details_row = format!(
             "<tr class=\"details-row\">
-                <td colspan=\"9\" class=\"details-content\">
+                <td colspan=\"10\" class=\"details-content\">
                     <div class=\"detail-item\"><span class=\"detail-label\">Full Hostname:</span> {}</div>
                     <div class=\"detail-item\"><span class=\"detail-label\">IP Address:</span> {}</div>
                     <div class=\"detail-item\"><span class=\"detail-label\">Status:</span> <span class=\"{}\">{}</span></div>
@@ -952,12 +983,13 @@ async fn handle_http_monitor_dashboard(
                 <tr>
                     <th onclick="sortTable(0)">Hostname</th>
                     <th onclick="sortTable(1)">IP Address</th>
-                    <th onclick="sortTable(2)">Status</th>
-                    <th onclick="sortTable(3)">Alive</th>
-                    <th onclick="sortTable(4)">Connected At</th>
-                    <th onclick="sortTable(5)">Last Message</th>
-                    <th onclick="sortTable(6)">Requests</th>
-                    <th onclick="sortTable(7)">Last Heartbeat</th>
+                    <th onclick="sortTable(2)">Version</th>
+                    <th onclick="sortTable(3)">Status</th>
+                    <th onclick="sortTable(4)">Alive</th>
+                    <th onclick="sortTable(5)">Connected At</th>
+                    <th onclick="sortTable(6)">Last Message</th>
+                    <th onclick="sortTable(7)">Requests</th>
+                    <th onclick="sortTable(8)">Last Heartbeat</th>
                     <th title="Click to expand">&#9432;</th>
                 </tr>
             </thead>
@@ -1368,6 +1400,8 @@ async fn exchange_peer_lists(
                             last_heartbeat_sent: None,
                             last_heartbeat_received: None,
                             alive: true,
+                            current_version: None,
+                            version_history: vec![],
                         }
                     });
             } else {
@@ -1406,6 +1440,42 @@ fn extract_hostname(request: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn extract_version(request: &str) -> Option<String> {
+    // Look for X-Version: header in the HTTP request
+    for line in request.lines() {
+        if line.to_lowercase().starts_with("x-version:") {
+            let version = line[10..].trim();
+            if !version.is_empty() {
+                return Some(version.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn update_version_history(info: &mut ConnectionInfo, new_version: &str, timestamp: &str) {
+    // Update current version
+    info.current_version = Some(new_version.to_string());
+
+    // Check if this version already exists in history
+    if let Some(existing) = info.version_history.iter_mut().find(|v| v.version == new_version) {
+        // Update existing version entry
+        existing.last_seen = timestamp.to_string();
+        existing.seen_count += 1;
+    } else {
+        // Add new version entry
+        info.version_history.push(VersionInfo {
+            version: new_version.to_string(),
+            first_seen: timestamp.to_string(),
+            last_seen: timestamp.to_string(),
+            seen_count: 1,
+        });
+    }
+
+    // Sort version history by last seen (most recent first)
+    info.version_history.sort_by(|a, b| b.last_seen.cmp(&a.last_seen));
 }
 
 fn extract_path(request: &str) -> Option<String> {

@@ -9,6 +9,14 @@ pub mod broadcast;
 use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize)]
+pub struct VersionInfo {
+    pub version: String,
+    pub first_seen: String,
+    pub last_seen: String,
+    pub seen_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct ConnectionInfo {
     pub hostname: String,
     pub ip_address: String,
@@ -21,4 +29,6 @@ pub struct ConnectionInfo {
     pub last_heartbeat_sent: Option<String>,
     pub last_heartbeat_received: Option<String>,
     pub alive: bool,
+    pub current_version: Option<String>,
+    pub version_history: Vec<VersionInfo>,
 }

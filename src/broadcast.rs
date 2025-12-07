@@ -127,6 +127,8 @@ pub async fn start_broadcast_listener(
                                         last_heartbeat_sent: None,
                                         last_heartbeat_received: None,
                                         alive: true,
+                                        current_version: None,
+                                        version_history: vec![],
                                     }
                                 });
                         } else {

@@ -59,8 +59,9 @@ impl PeerClient {
                     .to_string_lossy()
                     .to_string();
                 
-                // Send a test message with our hostname
-                let message = format!("GET / HTTP/1.1\r\nHost: peer\r\nX-Hostname: {}\r\n\r\n", hostname);
+                // Send a test message with our hostname and version
+                let our_version = env!("CARGO_PKG_VERSION").to_string();
+                let message = format!("GET / HTTP/1.1\r\nHost: peer\r\nX-Hostname: {}\r\nX-Version: {}\r\n\r\n", hostname, our_version);
                 println!("[CLIENT] Sending HTTP request with hostname: {}...", hostname);
                 tls_stream.write_all(message.as_bytes()).await?;
                 
