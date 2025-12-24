@@ -1373,29 +1373,6 @@ async fn handle_http_monitor_dashboard(
     Ok(())
 }
 
->>>>>>> 79390392c5945ff825fd2da3b7f9e747397b4772
-fn format_timestamp_short(timestamp: &str) -> String {
-    // Format RFC3339 timestamp to show date and time
-    // Input format: "2025-11-12T02:31:05Z"
-    // Output format: "2025-11-12 02:31:05"
-    if timestamp.len() >= 19 {
-        format!("{} {}", &timestamp[0..10], &timestamp[11..19])
-    } else {
-        timestamp.to_string()
-    }
-}
-fn format_timestamp_short(timestamp: &str) -> String {
-    // Format RFC3339 timestamp to show date and time
-    // Input format: "2025-11-12T02:31:05Z"
-    // Output format: "2025-11-12 02:31:05"
-    if timestamp.len() >= 19 {
-        format!("{} {}", &timestamp[0..10], &timestamp[11..19])
-    } else {
-        timestamp.to_string()
-    }
-}
-=======
->>>>>>> 79390392c5945ff825fd2da3b7f9e747397b4772
 fn format_timestamp_short(timestamp: &str) -> String {
     // Format RFC3339 timestamp to show date and time
     // Input format: "2025-11-12T02:31:05Z"
