@@ -56,11 +56,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let acceptor = TlsAcceptor::from(Arc::new(config));
 
     // Bind HTTP listener on port 39000 (for monitor dashboard)
-    let http_listener = TcpListener::bind("0.0.0.0:39000").await?;
+    let http_listener = TcpListener::bind("[::]:39000").await?;
     log!("HTTP monitor dashboard listening on port 39000");
 
     // Bind HTTPS listener on port 39001 (for secure communication)
-    let https_listener = TcpListener::bind("0.0.0.0:39001").await?;
+    let https_listener = TcpListener::bind("[::]:39001").await?;
     log!("HTTPS server listening on port 39001 (all subsequent requests)");
     log!("Press Ctrl-C to shutdown gracefully");
 
