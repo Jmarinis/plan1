@@ -266,6 +266,159 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 return;
                             }
 
+                            // Handle /api/status endpoint for AJAX updates
+                            if path == "/api/status" {
+                                log!("[API] Status request from {}", client_ip);
+
+                                // Get node name
+                                let node_name = match gethostname::gethostname().to_str() {
+                                    Some(name) => name.to_string(),
+                                    None => "Unknown".to_string(),
+                                };
+
+                                // Get connection data
+                                let conns = connections_clone.read().await;
+                                let mut conn_list: Vec<ConnectionInfo> = conns.values().cloned().collect();
+                                conn_list.sort_by(|a, b| b.last_message_time.cmp(&a.last_message_time));
+
+                                // Calculate statistics
+                                let total_peers = conn_list.len();
+                                let connected_count = conn_list.iter().filter(|c| c.status == "Connected").count();
+                                let alive_count = conn_list.iter().filter(|c| c.alive).count();
+                                let last_updated = time::OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339).unwrap_or_else(|_| String::from("unknown"));
+
+                                // Build JSON response
+                                let status_data = serde_json::json!({
+                                    "node_name": node_name,
+                                    "total_peers": total_peers,
+                                    "connected_count": connected_count,
+                                    "alive_count": alive_count,
+                                    "last_updated": last_updated,
+                                    "connections": conn_list
+                                });
+
+                                let body_str = status_data.to_string();
+                                let response = format!(
+                                    "HTTP/1.1 200 OK\r\n\
+                                     Content-Type: application/json\r\n\
+                                     Content-Length: {}\r\n\
+                                     Connection: close\r\n\
+                                     \r\n\
+                                     {}",
+                                    body_str.len(),
+                                    body_str
+                                );
+
+                                if let Err(e) = stream.write_all(response.as_bytes()).await {
+                                    log!("[ERROR] Failed to send API response: {:?}", e);
+                                } else {
+                                    log!("[API] ✓ Status data sent");
+                                }
+                                return;
+                            }
+
+                            // Handle /broadcast endpoint
+                            if path == "/broadcast" {
+                                log!("[BROADCAST] Manual broadcast requested from {}", client_ip);
+
+                                // Send a broadcast message
+                                if let Err(e) = broadcast::send_broadcast().await {
+                                    log!("[BROADCAST] Error sending broadcast: {}", e);
+                                } else {
+                                    log!("[BROADCAST] ✓ Broadcast sent successfully");
+                                }
+
+                                // Redirect to dashboard
+                                let redirect_response = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 23\r\nConnection: close\r\n\r\nBroadcast sent successfully";
+                                if let Err(e) = stream.write_all(redirect_response.as_bytes()).await {
+                                    log!("[ERROR] Failed to send broadcast response: {:?}", e);
+                                }
+                                return;
+                            }
+
+                            // Handle /connect endpoint
+                            if path.starts_with("/connect") {
+                                // Extract hostname from query parameter
+                                let hostname = if let Some(query_start) = path.find('?') {
+                                    let query = &path[query_start + 1..];
+                                    if let Some(host_param) = query.strip_prefix("hostname=") {
+                                        Some(urlencoding::decode(host_param).unwrap_or_else(|_| Cow::Borrowed(host_param)).to_string())
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    None
+                                };
+
+                                if let Some(hostname) = hostname {
+                                    if hostname.is_empty() {
+                                        log!("[CONNECT] Empty hostname provided from {}", client_ip);
+                                    } else {
+                                        log!("[CONNECT] Connection requested to hostname '{}' from {}", hostname, client_ip);
+
+                                        // Try to resolve hostname to IP
+                                        match tokio::net::lookup_host(format!("{}:39001", hostname)).await {
+                                            Ok(mut addrs) => {
+                                                if let Some(addr) = addrs.next() {
+                                                    let peer_ip = addr.ip().to_string();
+                                                    let peer_port = 39001;
+                                                    let peer_key = format!("{}:{}", peer_ip, peer_port);
+
+                                                    log!("[CONNECT] Resolved '{}' to {}, attempting connection", hostname, peer_ip);
+
+                                                    // Try to connect to the resolved peer
+                                                    let connection_succeeded = peer_client::connect_to_peer(&peer_ip, peer_port, true).await.is_ok();
+
+                                                    if connection_succeeded {
+                                                        log!("[CONNECT] ✓ Successfully connected to {} ({})", peer_key, hostname);
+
+                                                        // Add to connections tracking
+                                                        let now_utc = time::OffsetDateTime::now_utc();
+                                                        let timestamp = now_utc.format(&time::format_description::well_known::Rfc3339)
+                                                            .unwrap_or_else(|_| String::from("unknown"));
+
+                                                        let mut conns = connections_clone.write().await;
+                                                        conns.entry(peer_key.clone())
+                                                            .or_insert_with(|| {
+                                                                ConnectionInfo {
+                                                                    hostname: hostname.clone(),
+                                                                    ip_address: peer_ip.clone(),
+                                                                    status: "Connected (Manual)".to_string(),
+                                                                    connected_at: timestamp.clone(),
+                                                                    last_message: "Manual connection".to_string(),
+                                                                    last_message_time: timestamp,
+                                                                    request_count: 1,
+                                                                    verified: true,
+                                                                    last_heartbeat_sent: None,
+                                                                    last_heartbeat_received: None,
+                                                                    alive: true,
+                                                                }
+                                                            });
+                                                        log!("[CONNECT] Added connection: {} (Total: {})", peer_key, conns.len());
+                                                    } else {
+                                                        log!("[CONNECT] ⚠ Failed to connect to {} ({})", peer_key, hostname);
+                                                    }
+                                                } else {
+                                                    log!("[CONNECT] Could not resolve hostname '{}' from {}", hostname, client_ip);
+                                                }
+                                            }
+                                            Err(e) => {
+                                                log!("[CONNECT] DNS resolution failed for '{}' from {}: {}", hostname, client_ip, e);
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    log!("[CONNECT] No hostname parameter provided from {}", client_ip);
+                                }
+
+                                // Redirect to dashboard
+                                let redirect_response = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 19\r\nConnection: close\r\n\r\nConnection initiated";
+                                if let Err(e) = stream.write_all(redirect_response.as_bytes()).await {
+                                    log!("[ERROR] Failed to send connect response: {:?}", e);
+                                }
+                                return;
+                            }
+
                             // Handle root path (serve dashboard)
                             if path == "/" {
                                 if let Err(e) = handle_https_dashboard(&mut stream, &connections_clone).await {
@@ -2005,6 +2158,7 @@ async fn handle_https_dashboard(
         "HTTP/1.1 200 OK\r\n\
          Content-Type: text/html\r\n\
          Content-Length: {}\r\n\
+         Connection: close\r\n\
          \r\n\
          {}",
         html.len(),
