@@ -1211,13 +1211,7 @@ async fn handle_http_monitor_dashboard(
     Ok(())
 }
 
-fn truncate(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max_len])
-    }
-}
+
 
 fn format_timestamp_short(timestamp: &str) -> String {
     // Format RFC3339 timestamp to show date and time
