@@ -1,0 +1,18 @@
+[network]
+# Port for initial peer discovery and communication
+discovery_port = 39000
+
+# Port for secure peer-to-peer communication (negotiated after initial contact)
+communication_port = 39001
+
+# Host binding (empty string means bind to all interfaces)
+bind_host = ""
+
+[security]
+# Certificate paths (auto-generated if not specified)
+cert_path = "certs/server_cert.pem"
+key_path = "certs/server_key.pem"
+
+[logging]
+# Log level: error, warn, info, debug, trace
+level = "info"

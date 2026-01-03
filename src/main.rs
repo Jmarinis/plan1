@@ -15,6 +15,7 @@ pub mod peer_client;
 pub mod cert_verifier;
 pub mod heartbeat;
 pub mod broadcast;
+pub mod config;
 
 // Macro for timestamped logging
 macro_rules! log {
@@ -42,26 +43,46 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create shared state for tracking active connections
     let connections: Arc<RwLock<HashMap<String, ConnectionInfo>>> = Arc::new(RwLock::new(HashMap::new()));
 
+    // Load configuration
+    let config = config::Config::load().unwrap_or_else(|_| {
+        log!("Warning: Could not load config.toml, using defaults");
+        config::Config::default()
+    });
+
+    log!("Loaded configuration: discovery_port={}, communication_port={}",
+         config.network.discovery_port, config.network.communication_port);
+
     // Load TLS certificate and private key
-    let certs = load_certs(cert_manager::get_cert_path())?;
-    let key = load_private_key(cert_manager::get_key_path())?;
+    let certs = load_certs(&config.security.cert_path)?;
+    let key = load_private_key(&config.security.key_path)?;
 
     // Configure rustls server without client authentication
-    let config = ServerConfig::builder()
+    let tls_config = ServerConfig::builder()
         .with_safe_defaults()
         .with_no_client_auth()
         .with_single_cert(certs, key)
         .map_err(|e| e.to_string())?;
 
-    let acceptor = TlsAcceptor::from(Arc::new(config));
+    let acceptor = TlsAcceptor::from(Arc::new(tls_config));
 
-    // Bind HTTP listener on port 39000 (for monitor dashboard)
-    let http_listener = TcpListener::bind("[::]:39000").await?;
-    log!("HTTP monitor dashboard listening on port 39000");
+    // Bind discovery listener (initial contact point)
+    let bind_addr = if config.network.bind_host.is_empty() {
+        format!("[::]:{}", config.network.discovery_port)
+    } else {
+        format!("{}:{}", config.network.bind_host, config.network.discovery_port)
+    };
+    let discovery_listener = TcpListener::bind(&bind_addr).await?;
+    log!("Discovery listener listening on {} (port {})", bind_addr, config.network.discovery_port);
 
-    // Bind HTTPS listener on port 39001 (for secure communication)
-    let https_listener = TcpListener::bind("[::]:39001").await?;
-    log!("HTTPS server listening on port 39001 (all subsequent requests)");
+    // Bind communication listener (negotiated secure communication)
+    let comm_bind_addr = if config.network.bind_host.is_empty() {
+        format!("[::]:{}", config.network.communication_port)
+    } else {
+        format!("{}:{}", config.network.bind_host, config.network.communication_port)
+    };
+    let communication_listener = TcpListener::bind(&comm_bind_addr).await?;
+    log!("Communication listener listening on {} (port {})", comm_bind_addr, config.network.communication_port);
+
     log!("Press Ctrl-C to shutdown gracefully");
 
     // Setup Ctrl-C handler
@@ -180,48 +201,47 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 
 
-    // Spawn HTTP listener task for monitor dashboard
-    let connections_http = connections.clone();
-    let shutdown_http = shutdown.clone();
-    let _http_task = tokio::spawn(async move {
+    // Spawn discovery listener task
+    let connections_discovery = connections.clone();
+    let shutdown_discovery = shutdown.clone();
+    let config_discovery = config.clone();
+    let _discovery_task = tokio::spawn(async move {
         loop {
             tokio::select! {
-                result = http_listener.accept() => {
+                result = discovery_listener.accept() => {
                     match result {
                         Ok((stream, addr)) => {
                             let client_ip = addr.ip();
-                            log!("[HTTP] Monitor request from {} (port: {})", client_ip, addr.port());
-
-                            let connections_clone = connections_http.clone();
+                            let config_clone = config_discovery.clone();
                             tokio::spawn(async move {
-                                if let Err(e) = handle_http_monitor_dashboard(stream, client_ip, &connections_clone).await {
-                                    log!("[ERROR] Monitor dashboard request failed: {:?}", e);
+                                if let Err(e) = handle_discovery_request(stream, client_ip, &config_clone).await {
+                                    log!("[ERROR] Discovery request failed: {:?}", e);
                                 }
                             });
                         }
-                        Err(e) => log!("[ERROR] HTTP listener error: {:?}", e),
+                        Err(e) => log!("[ERROR] Discovery listener error: {:?}", e),
                     }
                 }
-                _ = shutdown_http.notified() => {
-                    log!("[SHUTDOWN] HTTP monitor listener shutting down");
+                _ = shutdown_discovery.notified() => {
+                    log!("[SHUTDOWN] Discovery listener shutting down");
                     break;
                 }
             }
         }
     });
 
-    // Handle HTTPS listener in main loop
+    // Handle communication listener in main loop
     loop {
         tokio::select! {
-            result = https_listener.accept() => {
+            result = communication_listener.accept() => {
         let (stream, addr) = result?;
         let client_ip = addr.ip();
-        log!("[HTTPS] New connection from {} (port: {})", client_ip, addr.port());
+        log!("[COMMUNICATION] New connection from {} (port: {})", client_ip, addr.port());
 
         // Upgrade the TCP connection to TLS
         let acceptor = acceptor.clone();
         let connections_clone = connections.clone();
-        let verified_peers_https = verified_peers.clone();
+        let verified_peers_comm = verified_peers.clone();
         tokio::spawn(async move {
             log!("[TLS] Starting TLS handshake with {}", client_ip);
 
@@ -357,11 +377,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         log!("[CONNECT] Connection requested to hostname '{}' from {}", hostname, client_ip);
 
                                         // Try to resolve hostname to IP
-                                        match tokio::net::lookup_host(format!("{}:39001", hostname)).await {
+                                        match tokio::net::lookup_host(format!("{}:{}", hostname, config.network.communication_port)).await {
                                             Ok(mut addrs) => {
                                                 if let Some(addr) = addrs.next() {
                                                     let peer_ip = addr.ip().to_string();
-                                                    let peer_port = 39001;
+                                                    let peer_port = config.network.communication_port;
                                                     let peer_key = format!("{}:{}", peer_ip, peer_port);
 
                                                     log!("[CONNECT] Resolved '{}' to {}, attempting connection", hostname, peer_ip);
@@ -445,7 +465,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                             // Check if peer is already verified
                             let already_verified = {
-                                let peers = verified_peers_https.read().await;
+                                let peers = verified_peers_comm.read().await;
                                 peers.contains(&peer_key)
                             };
 
@@ -455,7 +475,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             } else {
                                 // Add to verified peers BEFORE initiating connection to prevent infinite loop
                                 {
-                                    let mut peers = verified_peers_https.write().await;
+                                    let mut peers = verified_peers_comm.write().await;
                                     peers.insert(peer_key.clone());
                                 }
 
@@ -466,7 +486,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         log!("[PEER] ✓ Mutual trust established with {}", peer_key);
 
                                         // Exchange peer lists after successful verification
-                                        let verified_peers_clone = verified_peers_https.clone();
+                                        let verified_peers_clone = verified_peers_comm.clone();
                                         let connections_clone2 = connections_clone.clone();
                                         let client_ip_str = client_ip.to_string();
                                         tokio::spawn(async move {
@@ -486,7 +506,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                                 // Remove from verified peers if connection failed
                                 if !connection_succeeded {
-                                    let mut peers = verified_peers_https.write().await;
+                                    let mut peers = verified_peers_comm.write().await;
                                     peers.remove(&peer_key);
                                 }
 
@@ -559,13 +579,66 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
             }
             _ = shutdown.notified() => {
-                log!("[SHUTDOWN] HTTPS listener shutting down");
+                log!("[SHUTDOWN] Communication listener shutting down");
                 break;
             }
         }
     }
 
     log!("[SHUTDOWN] Server stopped. Goodbye!");
+    Ok(())
+}
+
+// Handle discovery requests (initial contact point)
+async fn handle_discovery_request(
+    mut stream: tokio::net::TcpStream,
+    client_ip: IpAddr,
+    config: &config::Config,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    // Read the request
+    let mut buf = [0u8; 1024];
+    let n = stream.read(&mut buf).await?;
+    if n == 0 {
+        return Ok(());
+    }
+
+    let request = String::from_utf8_lossy(&buf[..n]);
+    let path = extract_path(&request).unwrap_or_else(|| "/".to_string());
+
+    log!("[DISCOVERY] {} requested {}", client_ip, path);
+
+    // Respond with communication port information
+    let response_body = format!(r#"{{
+        "communication_port": {},
+        "node_info": {{
+            "hostname": "{}",
+            "ip_address": "{}"
+        }}
+    }}"#,
+        config.network.communication_port,
+        gethostname::gethostname().to_str().unwrap_or("unknown"),
+        client_ip.to_string()
+    );
+
+    let response = format!(
+        "HTTP/1.1 200 OK\r\n\
+         Content-Type: application/json\r\n\
+         Content-Length: {}\r\n\
+         X-Communication-Port: {}\r\n\
+         Connection: close\r\n\
+         \r\n\
+         {}",
+        response_body.len(),
+        config.network.communication_port,
+        response_body
+    );
+
+    stream.write_all(response.as_bytes()).await?;
+    stream.flush().await?;
+
+    log!("[DISCOVERY] ✓ Sent communication port {} to {}", config.network.communication_port, client_ip);
     Ok(())
 }
 
