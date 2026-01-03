@@ -1,2 +1,3 @@
 /target
 certs/trusted_peers.json
+.DS_Store
