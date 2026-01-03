@@ -14,10 +14,9 @@ macro_rules! log {
     }};
 }
 
-const BROADCAST_PORT: u16 = 39002;
 const BROADCAST_MESSAGE: &str = "PLAN1_PEER_DISCOVERY";
 
-pub async fn send_broadcast() -> Result<(), Box<dyn std::error::Error>> {
+pub async fn send_broadcast(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     log!("Broadcasting peer discovery message on all interfaces");
 
     // Create UDP socket
@@ -33,7 +32,7 @@ pub async fn send_broadcast() -> Result<(), Box<dyn std::error::Error>> {
     let message = format!("{}:{}", BROADCAST_MESSAGE, hostname);
 
     // Send to IPv4 broadcast address
-    let broadcast_addr = SocketAddr::from((Ipv4Addr::BROADCAST, BROADCAST_PORT));
+    let broadcast_addr = SocketAddr::from((Ipv4Addr::BROADCAST, port));
     let sent = socket.send_to(message.as_bytes(), broadcast_addr).await?;
     log!("✓ Sent {} bytes to broadcast address {}", sent, broadcast_addr);
 
@@ -43,11 +42,12 @@ pub async fn send_broadcast() -> Result<(), Box<dyn std::error::Error>> {
 pub async fn start_broadcast_listener(
     verified_peers: Arc<RwLock<std::collections::HashSet<String>>>,
     connections: Arc<RwLock<HashMap<String, ConnectionInfo>>>,
+    port: u16,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    log!("Starting broadcast listener on port {}", BROADCAST_PORT);
+    log!("Starting broadcast listener on port {}", port);
 
     // Bind to broadcast port
-    let socket = UdpSocket::bind(format!("0.0.0.0:{}", BROADCAST_PORT)).await?;
+    let socket = UdpSocket::bind(format!("0.0.0.0:{}", port)).await?;
     socket.set_broadcast(true)?;
 
     let mut buf = [0u8; 1024];
@@ -67,7 +67,7 @@ pub async fn start_broadcast_listener(
                     };
 
                     let peer_ip = addr.ip().to_string();
-                    let peer_port = 39001; // Default HTTPS port
+                    let peer_port = port; // Use the same port for connections
                     let peer_key = format!("{}:{}", peer_ip, peer_port);
 
                     // Check if we already know this peer
