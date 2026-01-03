@@ -555,18 +555,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     if path == "/broadcast" {
                                         log!("[BROADCAST] Manual broadcast requested from {}", client_ip);
 
-                                        // Send a broadcast message
-                                        if let Err(e) = broadcast::send_broadcast(config_clone.network.connection_port).await {
-                                            log!("[BROADCAST] Error sending broadcast: {}", e);
-                                        } else {
-                                            log!("[BROADCAST] ✓ Broadcast sent successfully");
-                                        }
-
-                                        // Redirect to dashboard
-                                        let redirect_response = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 23\r\nConnection: close\r\n\r\nBroadcast sent successfully";
-                                        let _ = stream.write_all(redirect_response.as_bytes()).await;
-                                        return;
+                                // Send a broadcast message
+                                let broadcast_port = config_clone.network.connection_port;
+                                log!("[BROADCAST] Sending broadcast on port {}", broadcast_port);
+                                if let Err(e) = broadcast::send_broadcast(broadcast_port).await {
+                                    log!("[BROADCAST] Error sending broadcast: {}", e);
+                                    let error_response = format!("HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\nFailed to send broadcast", "Failed to send broadcast".len());
+                                    let _ = stream.write_all(error_response.as_bytes()).await;
+                                } else {
+                                    log!("[BROADCAST] ✓ Broadcast sent successfully on port {}", broadcast_port);
+                                    let success_message = format!("Broadcast sent successfully on port {}", broadcast_port);
+                                    let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", success_message.len(), success_message);
+                                    if let Err(e) = stream.write_all(response.as_bytes()).await {
+                                        log!("[ERROR] Failed to send broadcast response: {:?}", e);
                                     }
+                                }
 
                                     // Handle /connect endpoint
                                     if path.starts_with("/connect") {
