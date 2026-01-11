@@ -5,6 +5,7 @@ pub mod peer_trust;
 pub mod peer_client;
 pub mod cert_verifier;
 pub mod broadcast;
+pub mod config;
 
 use serde::Serialize;
 
