@@ -114,6 +114,11 @@
         transform: translateX(5px);
       }
 
+      .peer-card.offline {
+        border-left-color: #dc3545;
+        opacity: 0.7;
+      }
+
       .peer-header {
         display: flex;
         justify-content: space-between;
@@ -145,6 +150,11 @@
         color: #721c24;
       }
 
+      .status-offline {
+        background: #e2e3e5;
+        color: #383d41;
+      }
+
       .peer-info {
         display: grid;
         gap: 10px;
@@ -168,6 +178,7 @@
         padding: 30px;
         box-shadow: 0 10px 30px rgba(0,0,0,0.1);
         text-align: center;
+        margin-bottom: 30px;
       }
 
       .network-title {
@@ -201,6 +212,10 @@
         box-shadow: 0 5px 15px rgba(102, 126, 234, 0.3);
       }
 
+      .node.offline {
+        background: #6c757d;
+      }
+
       .connection-line {
         position: absolute;
         height: 2px;
@@ -213,7 +228,15 @@
         border-radius: 15px;
         padding: 30px;
         box-shadow: 0 10px 30px rgba(0,0,0,0.1);
-        margin-top: 30px;
+      }
+
+      .section-title {
+        font-size: 1.8em;
+        color: #333;
+        margin-bottom: 20px;
+        display: flex;
+        align-items: center;
+        gap: 10px;
       }
 
       .log-entry {
@@ -226,6 +249,14 @@
 
       .log-entry:last-child {
         border-bottom: none;
+      }
+
+      .log-entry.error {
+        color: #dc3545;
+      }
+
+      .log-entry.success {
+        color: #28a745;
       }
 
       .refresh-btn {
@@ -242,6 +273,20 @@
 
       .refresh-btn:hover {
         background: #5568d3;
+      }
+
+      .no-peers {
+        text-align: center;
+        padding: 40px;
+        color: #888;
+        font-size: 1.1em;
+      }
+
+      .last-updated {
+        text-align: right;
+        color: #888;
+        font-size: 0.85em;
+        margin-top: 15px;
       }
 
       @media (max-width: 768px) {
@@ -272,15 +317,15 @@
       <div class="stats-grid">
         <div class="stat-card">
           <div class="stat-label">Total Peers</div>
-          <div class="stat-value" id="total-peers">0</div>
+          <div class="stat-value" id="total-peers">-</div>
         </div>
         <div class="stat-card">
           <div class="stat-label">Active Connections</div>
-          <div class="stat-value" id="active-connections">0</div>
+          <div class="stat-value" id="active-connections">-</div>
         </div>
         <div class="stat-card">
           <div class="stat-label">Network Health</div>
-          <div class="stat-value" id="network-health">100%</div>
+          <div class="stat-value" id="network-health">-%</div>
         </div>
         <div class="stat-card">
           <div class="stat-label">Uptime</div>
@@ -294,35 +339,15 @@
           Connected Peers
         </div>
         <div class="peers-grid" id="peers-container">
-          <!-- Peer cards will be dynamically inserted here -->
-          <div class="peer-card">
-            <div class="peer-header">
-              <div class="peer-name">Local Node</div>
-              <div class="peer-status status-connected">Connected</div>
-            </div>
-            <div class="peer-info">
-              <div class="info-row">
-                <span class="info-label">IP Address:</span>
-                <span id="local-ip">127.0.0.1</span>
-              </div>
-              <div class="info-row">
-                <span class="info-label">Port:</span>
-                <span id="local-port">39000</span>
-              </div>
-              <div class="info-row">
-                <span class="info-label">Status:</span>
-                <span>Active</span>
-              </div>
-            </div>
-          </div>
+          <div class="no-peers">Loading peer data...</div>
         </div>
+        <div class="last-updated" id="last-updated"></div>
       </div>
 
       <div class="network-visualization">
         <div class="network-title">Network Topology</div>
-        <div class="network-diagram">
+        <div class="network-diagram" id="network-diagram">
           <div class="node">YOU</div>
-          <!-- Connected peer nodes will be added dynamically -->
         </div>
       </div>
 
@@ -333,113 +358,192 @@
         </div>
         <div id="logs-container">
           <div class="log-entry">[SYSTEM] Dashboard initialized</div>
-          <div class="log-entry">[NETWORK] Listening on port 39000</div>
-          <div class="log-entry">[PEER] Local node started</div>
         </div>
         <button class="refresh-btn" onclick="refreshData()">🔄 Refresh Data</button>
       </div>
     </div>
 
     <script>
-      // Simulate dynamic data updates
-      function updateDashboard() {
-        // Update stats
-        document.getElementById('total-peers').textContent = Math.floor(Math.random() * 5) + 1;
-        document.getElementById('active-connections').textContent = Math.floor(Math.random() * 3) + 1;
-        document.getElementById('network-health').textContent = (Math.floor(Math.random() * 15) + 85) + '%';
+      let startTime = null;
+      let logs = [];
 
-        // Update uptime
-        const startTime = new Date();
-        setInterval(() => {
-          const now = new Date();
-          const diff = now - startTime;
-          const minutes = Math.floor(diff / 60000);
-          const seconds = Math.floor((diff % 60000) / 1000);
-          document.getElementById('uptime').textContent =
-            `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
-        }, 1000);
+      function addLog(message, type = '') {
+        const logsContainer = document.getElementById('logs-container');
+        const logEntry = document.createElement('div');
+        logEntry.className = 'log-entry ' + type;
+        const timestamp = new Date().toLocaleTimeString();
+        logEntry.textContent = `[${timestamp}] ${message}`;
+        logsContainer.appendChild(logEntry);
+        logsContainer.scrollTop = logsContainer.scrollHeight;
+        
+        // Keep only last 50 logs
+        while (logsContainer.children.length > 50) {
+          logsContainer.removeChild(logsContainer.firstChild);
+        }
+      }
 
-        // Add some sample peer connections
-        const peers = [
-          {
-            name: 'Peer Node 1',
-            ip: '192.168.1.101',
-            port: '39001',
-            status: 'Connected',
-            lastSeen: '2 minutes ago'
-          },
-          {
-            name: 'Peer Node 2',
-            ip: '192.168.1.102',
-            port: '39001',
-            status: 'Connected',
-            lastSeen: '5 minutes ago'
-          }
-        ];
+      function formatTime(isoString) {
+        if (!isoString) return 'N/A';
+        const date = new Date(isoString);
+        return date.toLocaleString();
+      }
 
-        const peersContainer = document.getElementById('peers-container');
+      function getStatusClass(status) {
+        if (status.includes('Connected')) return 'status-connected';
+        if (status.includes('Unresponsive')) return 'status-disconnected';
+        return 'status-offline';
+      }
 
-        peers.forEach(peer => {
-          const peerCard = document.createElement('div');
-          peerCard.className = 'peer-card';
-          peerCard.innerHTML = `
+      function renderPeerCard(peer) {
+        const isAlive = peer.alive;
+        const cardClass = isAlive ? 'peer-card' : 'peer-card offline';
+        const statusClass = getStatusClass(peer.status);
+        
+        return `
+          <div class="${cardClass}">
             <div class="peer-header">
-              <div class="peer-name">${peer.name}</div>
-              <div class="peer-status status-connected">${peer.status}</div>
+              <div class="peer-name">${escapeHtml(peer.hostname)}</div>
+              <div class="peer-status ${statusClass}">${escapeHtml(peer.status)}</div>
             </div>
             <div class="peer-info">
               <div class="info-row">
                 <span class="info-label">IP Address:</span>
-                <span>${peer.ip}</span>
+                <span>${escapeHtml(peer.ip_address)}</span>
               </div>
               <div class="info-row">
                 <span class="info-label">Port:</span>
-                <span>${peer.port}</span>
+                <span>${peer.ip_address.includes(':') ? peer.ip_address.split(':').pop() : '39001'}</span>
               </div>
               <div class="info-row">
-                <span class="info-label">Last Seen:</span>
-                <span>${peer.lastSeen}</span>
+                <span class="info-label">Verified:</span>
+                <span>${peer.verified ? '✓ Yes' : '✗ No'}</span>
               </div>
+              <div class="info-row">
+                <span class="info-label">Connected:</span>
+                <span>${formatTime(peer.connected_at)}</span>
+              </div>
+              <div class="info-row">
+                <span class="info-label">Last Message:</span>
+                <span>${formatTime(peer.last_message_time)}</span>
+              </div>
+              ${peer.last_heartbeat_received ? `
+              <div class="info-row">
+                <span class="info-label">Last Heartbeat:</span>
+                <span>${formatTime(peer.last_heartbeat_received)}</span>
+              </div>
+              ` : ''}
             </div>
-          `;
-          peersContainer.appendChild(peerCard);
-        });
+          </div>
+        `;
+      }
 
-        // Add network visualization nodes
-        const networkDiagram = document.querySelector('.network-diagram');
-        peers.forEach((peer, index) => {
+      function escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+      }
+
+      function updateNetworkDiagram(peers) {
+        const diagram = document.getElementById('network-diagram');
+        // Clear existing peer nodes (keep the YOU node)
+        const nodes = diagram.querySelectorAll('.node:not(:first-child)');
+        const lines = diagram.querySelectorAll('.connection-line');
+        nodes.forEach(n => n.remove());
+        lines.forEach(l => l.remove());
+
+        const activePeers = peers.filter(p => p.alive);
+        
+        activePeers.forEach((peer, index) => {
           const peerNode = document.createElement('div');
           peerNode.className = 'node';
           peerNode.style.position = 'absolute';
-          peerNode.style.left = `${100 + index * 80}px`;
-          peerNode.style.top = `${50 + index * 40}px`;
-          peerNode.textContent = peer.name.split(' ')[2];
-          networkDiagram.appendChild(peerNode);
+          peerNode.style.left = `${100 + (index % 4) * 100}px`;
+          peerNode.style.top = `${50 + Math.floor(index / 4) * 80}px`;
+          peerNode.textContent = peer.hostname.substring(0, 4).toUpperCase();
+          peerNode.title = peer.hostname;
+          diagram.appendChild(peerNode);
 
           // Add connection line
           const connectionLine = document.createElement('div');
           connectionLine.className = 'connection-line';
           connectionLine.style.left = '60px';
-          connectionLine.style.top = `${70 + index * 40}px`;
-          connectionLine.style.width = `${90 + index * 80}px`;
-          networkDiagram.appendChild(connectionLine);
+          connectionLine.style.top = `${80 + Math.floor(index / 4) * 80}px`;
+          connectionLine.style.width = `${90 + (index % 4) * 100}px`;
+          diagram.appendChild(connectionLine);
         });
       }
 
-      function refreshData() {
-        const logsContainer = document.getElementById('logs-container');
-        const logEntry = document.createElement('div');
-        logEntry.className = 'log-entry';
-        logEntry.textContent = `[SYSTEM] Data refreshed at ${new Date().toLocaleTimeString()}`;
-        logsContainer.appendChild(logEntry);
-        logsContainer.scrollTop = logsContainer.scrollHeight;
+      async function fetchPeers() {
+        try {
+          const response = await fetch('/api/peers');
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+          }
+          const peers = await response.json();
+          return Array.isArray(peers) ? peers : [];
+        } catch (error) {
+          console.error('Failed to fetch peers:', error);
+          addLog(`Failed to fetch peers: ${error.message}`, 'error');
+          return [];
+        }
+      }
 
-        // Update some random values to simulate refresh
-        document.getElementById('network-health').textContent = (Math.floor(Math.random() * 10) + 90) + '%';
+      async function updateDashboard() {
+        const peers = await fetchPeers();
+        
+        // Update stats
+        const totalPeers = peers.length;
+        const activePeers = peers.filter(p => p.alive).length;
+        const health = totalPeers > 0 ? Math.round((activePeers / totalPeers) * 100) : 100;
+        
+        document.getElementById('total-peers').textContent = totalPeers;
+        document.getElementById('active-connections').textContent = activePeers;
+        document.getElementById('network-health').textContent = health + '%';
+        
+        // Update uptime
+        if (!startTime) {
+          startTime = new Date();
+        }
+        const now = new Date();
+        const diff = now - startTime;
+        const hours = Math.floor(diff / 3600000);
+        const minutes = Math.floor((diff % 3600000) / 60000);
+        const seconds = Math.floor((diff % 60000) / 1000);
+        document.getElementById('uptime').textContent =
+          `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+
+        // Render peers
+        const peersContainer = document.getElementById('peers-container');
+        
+        if (peers.length === 0) {
+          peersContainer.innerHTML = '<div class="no-peers">No peers connected yet. Peers will appear here when they connect via TLS.</div>';
+        } else {
+          peersContainer.innerHTML = peers.map(renderPeerCard).join('');
+        }
+        
+        // Update network diagram
+        updateNetworkDiagram(peers);
+        
+        // Update last updated timestamp
+        document.getElementById('last-updated').textContent = 
+          `Last updated: ${new Date().toLocaleTimeString()}`;
+      }
+
+      function refreshData() {
+        addLog('Refreshing peer data...', 'success');
+        updateDashboard();
       }
 
       // Initialize dashboard when page loads
-      window.addEventListener('load', updateDashboard);
+      window.addEventListener('load', () => {
+        addLog('Dashboard loaded, fetching peer data...', 'success');
+        updateDashboard();
+        
+        // Auto-refresh every 5 seconds
+        setInterval(() => {
+          updateDashboard();
+        }, 5000);
+      });
     </script>
   </body>
 </html>

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::collections::HashMap;
 use tokio::sync::RwLock;
 use crate::cert_verifier::TofuServerCertVerifier;
-use plan1::ConnectionInfo;
+use crate::ConnectionInfo;
 
 // Macro for timestamped logging
 macro_rules! log {
@@ -77,7 +77,7 @@ pub async fn send_heartbeat_to_peer(
 }
 
 /// Send heartbeats to all verified peers and update connection tracking
-pub(crate) async fn send_heartbeats_to_all(
+pub async fn send_heartbeats_to_all(
     connections: &Arc<RwLock<HashMap<String, ConnectionInfo>>>,
 ) {
     let peers_to_check: Vec<(String, String)> = {

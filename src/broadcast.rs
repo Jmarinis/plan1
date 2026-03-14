@@ -40,7 +40,7 @@ pub async fn send_broadcast(port: u16) -> Result<(), Box<dyn std::error::Error>>
 }
 
 pub async fn start_broadcast_listener(
-    verified_peers: Arc<RwLock<std::collections::HashSet<String>>>,
+    verified_peers: Arc<RwLock<HashMap<String, String>>>,
     connections: Arc<RwLock<HashMap<String, ConnectionInfo>>>,
     port: u16,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -73,7 +73,7 @@ pub async fn start_broadcast_listener(
                     // Check if we already know this peer
                     {
                         let peers = verified_peers.read().await;
-                        if peers.contains(&peer_key) {
+                        if peers.contains_key(&peer_key) {
                             log!("Already know peer {}, skipping", peer_key);
                             continue;
                         }
@@ -84,7 +84,7 @@ pub async fn start_broadcast_listener(
                     // Add to verified peers before connecting
                     {
                         let mut peers = verified_peers.write().await;
-                        peers.insert(peer_key.clone());
+                        peers.insert(peer_key.clone(), hostname.clone());
                     }
 
                     // Attempt to connect to the discovered peer
