@@ -105,33 +105,3 @@ impl ServerCertVerifier for TofuServerCertVerifier {
     }
 }
 
-// Dummy implementation to satisfy the old interface
-#[allow(dead_code)]
-impl TofuServerCertVerifier {
-    // Old verify_server_cert method - now handled by the trait implementation above
-}
-
-/// Verifier that accepts any certificate (for initial handshake on server side)
-pub struct AcceptAnyCertVerifier;
-
-impl AcceptAnyCertVerifier {
-    pub fn new() -> Arc<Self> {
-        Arc::new(Self)
-    }
-}
-
-impl rustls::server::ClientCertVerifier for AcceptAnyCertVerifier {
-    fn client_auth_root_subjects(&self) -> Option<rustls::DistinguishedNames> {
-        Some(rustls::DistinguishedNames::new())
-    }
-
-    fn verify_client_cert(
-        &self,
-        _end_entity: &Certificate,
-        _intermediates: &[Certificate],
-        _now: SystemTime,
-    ) -> Result<rustls::server::ClientCertVerified, TlsError> {
-        // Accept any certificate - we'll verify via reverse connection
-        Ok(rustls::server::ClientCertVerified::assertion())
-    }
-}

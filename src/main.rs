@@ -74,7 +74,7 @@ async fn handle_dashboard_request(
     let request = String::from_utf8_lossy(&buffer[..n]);
     
     // Parse path for API endpoints
-    let mut html = DASHBOARD_HTML.to_string();
+    let html = DASHBOARD_HTML.to_string();
     
     // Simple API: /api/peers returns JSON
     if request.starts_with("GET /api/peers") {

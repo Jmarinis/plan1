@@ -146,20 +146,3 @@ pub async fn send_heartbeats_to_all(
     
     log!("[HEARTBEAT] Heartbeat round complete");
 }
-
-/// Start the background heartbeat task
-pub(crate) fn start_heartbeat_task(
-    connections: Arc<RwLock<HashMap<String, ConnectionInfo>>>,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        log!("[HEARTBEAT] Starting heartbeat task (60 second interval)");
-        
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        
-        loop {
-            interval.tick().await;
-            send_heartbeats_to_all(&connections).await;
-        }
-    })
-}
